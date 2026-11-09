@@ -1,7 +1,7 @@
 {
   "name": "0n3-desktop",
   "productName": "0n3",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "0n3 on your desktop: a chat bubble that sits on top of everything and your own AI that does the work.",
   "main": "main.js",
   "type": "module",
@@ -14,9 +14,6 @@
     "dist:mac": "electron-builder --mac",
     "dist:win": "electron-builder --win",
     "dist": "electron-builder --mac --win"
-  },
-  "dependencies": {
-    "0nmcp": "https://0n3.app/dl/0n3-desk.tgz"
   },
   "devDependencies": {
     "electron": "^33.2.0",
@@ -100,5 +97,8 @@
       "shortcutName": "0n3"
     },
     "publish": null
+  },
+  "dependencies": {
+    "0nmcp": "https://0n3.app/dl/0n3-desk.tgz"
   }
 }

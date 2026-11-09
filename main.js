@@ -13,8 +13,8 @@
  * 0n3 command here, so the app writes a shim at ~/.0n/bin/0n3 that runs the bundled cli.js with this app's own Node.
  */
 import { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, shell, screen, nativeImage } from 'electron';
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, chmodSync, appendFileSync, unlinkSync } from 'node:fs';
+import { spawn, execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, writeFileSync, chmodSync, appendFileSync, unlinkSync, readFileSync, copyFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import os from 'node:os';
@@ -90,6 +90,48 @@ async function signOut() {
   refreshTray();
 }
 
+// ── first-run setup: find the AIs on this computer, put 0n3 inside each ─────────
+const PATH_EXTRA = [join(HOME, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'];
+const pathEnv = () => ({ ...process.env, PATH: [...(process.env.PATH || '').split(WIN ? ';' : ':'), ...(WIN ? [] : PATH_EXTRA)].filter(Boolean).join(WIN ? ';' : ':') });
+function which(bin) {
+  try { return execFileSync(WIN ? 'where' : 'sh', WIN ? [bin] : ['-c', `command -v ${bin}`], { encoding: 'utf8', env: pathEnv(), stdio: ['ignore', 'pipe', 'ignore'] }).trim().split(/\r?\n/)[0] || null; } catch { return null; }
+}
+const setupMod = async () => import(pathToFileURL(join(PKG, 'desk-setup.js')).href);
+async function detect() {
+  const { detectClients } = await setupMod();
+  const clients = detectClients({ platform: process.platform, home: HOME, env: process.env, exists: existsSync, which });
+  log(`detect: ${clients.filter((c) => c.found).map((c) => c.key).join(', ') || 'nothing found'}`);
+  return { platform: process.platform, clients };
+}
+/** Put 0n3 into one AI. Settings files are backed up beside the original before they change. */
+async function connect(key, { token, mcp }) {
+  if (!/^0n_/.test(String(token || ''))) throw new Error('No 0n3 key for this program.');
+  const { planFor } = await setupMod();
+  const plan = planFor(key, { platform: process.platform, home: HOME, env: process.env, token, mcp: mcp || `${ON3}/mcp` });
+  if (plan.kind === 'file') {
+    const existing = existsSync(plan.file) ? readFileSync(plan.file, 'utf8') : '';
+    const next = plan.apply(existing);
+    mkdirSync(dirname(plan.file), { recursive: true });
+    if (existing) { const bak = `${plan.file}.0n3-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`; copyFileSync(plan.file, bak); }
+    writeFileSync(plan.file, next);
+    log(`connect ${key}: wrote ${plan.file}`);
+    return { ok: true, did: 'file', file: plan.file };
+  }
+  if (plan.kind === 'command') {
+    const bin = which(plan.bin); if (!bin) throw new Error(`${plan.bin} is not on this computer's PATH.`);
+    const run = (args) => { try { return { ok: true, out: execFileSync(bin, args, { encoding: 'utf8', env: pathEnv(), stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }) }; } catch (e) { return { ok: false, out: `${e.stdout || ''}${e.stderr || ''}${e.message || ''}` }; } };
+    let r = run(plan.args);
+    if (!r.ok && /already exists/i.test(r.out)) { run(['mcp', 'remove', '--scope', 'user', '0n3']); r = run(plan.args); }
+    if (!r.ok) throw new Error(r.out.trim().split('\n').slice(-3).join(' ').slice(0, 300) || 'the command failed');
+    let skill = null;
+    if (plan.alsoSkill) { try { const t = await (await fetch(`${ON3}/api/install/skill`)).text(); mkdirSync(dirname(plan.alsoSkill), { recursive: true }); writeFileSync(plan.alsoSkill, t); skill = plan.alsoSkill; } catch (e) { log(`skill download failed: ${e.message}`); } }
+    log(`connect ${key}: ran ${plan.bin} ${plan.args.slice(0, 3).join(' ')}…${skill ? ` + skill ${skill}` : ''}`);
+    return { ok: true, did: 'command', skill };
+  }
+  if (plan.kind === 'manual') return { ok: true, did: 'manual', steps: plan.steps };
+  return { ok: true, did: 'nothing', note: plan.note };
+}
+
 // ── windows ──────────────────────────────────────────────────────────────────
 let bubble = null; let panel = null; let tray = null;
 const fromOurPage = (e) => { try { return new URL(e.senderFrame?.url || e.sender.getURL()).origin === new URL(ON3).origin || e.sender === bubble?.webContents; } catch { return false; } };
@@ -155,6 +197,8 @@ app.on('will-quit', () => { globalShortcut.unregisterAll(); stopAgent(); });
 ipcMain.handle('desk:status', (e) => (fromOurPage(e) ? status() : null));
 ipcMain.handle('desk:login', (e, token) => (fromOurPage(e) ? login(token) : null));
 ipcMain.handle('desk:open', (e, url) => { if (fromOurPage(e) && /^https?:\/\//.test(String(url))) shell.openExternal(String(url)); });
+ipcMain.handle('desk:detect', (e) => (fromOurPage(e) ? detect() : null));
+ipcMain.handle('desk:connect', async (e, key, o) => { if (!fromOurPage(e)) return null; try { return await connect(String(key || ''), o || {}); } catch (err) { log(`connect ${key} failed: ${err.message}`); return { ok: false, error: err.message }; } });
 ipcMain.handle('bubble:toggle', (e) => { if (fromOurPage(e)) togglePanel(); });
 ipcMain.handle('panel:hide', (e) => { if (fromOurPage(e)) togglePanel(false); });
 
@@ -176,7 +220,10 @@ app.whenReady().then(async () => {
       writeFileSync(join(dir, 'bubble.png'), (await bubble.webContents.capturePage()).toPNG());
       writeFileSync(join(dir, 'panel.png'), (await panel.webContents.capturePage()).toPNG());
       const windows = BrowserWindow.getAllWindows().map((w) => ({ title: w.getTitle(), url: w.webContents.getURL(), bounds: w.getBounds(), visible: w.isVisible(), alwaysOnTop: w.isAlwaysOnTop() }));
-      writeFileSync(join(dir, 'status.json'), JSON.stringify({ windows, agentState, shim: SHIM, pkg: PKG, runner: RUNNER, status: await status() }, null, 2));
+      // the setup path, end to end on this machine: what is found, and one settings-file write (Cursor's file, under this HOME)
+      const found = await detect();
+      const wrote = await connect('cursor', { token: '0n_smoketest', mcp: `${ON3}/mcp` }).catch((e) => ({ ok: false, error: e.message }));
+      writeFileSync(join(dir, 'status.json'), JSON.stringify({ windows, agentState, shim: SHIM, pkg: PKG, runner: RUNNER, status: await status(), detect: found.clients.filter((c) => c.found).map((c) => `${c.key} via ${c.via}${c.connectable ? ' → connectable' : ''}`), connectCursor: wrote, cursorFile: wrote.file && existsSync(wrote.file) ? readFileSync(wrote.file, 'utf8') : null }, null, 2));
     } catch (e) { writeFileSync(join(dir, 'error.txt'), String(e.stack || e)); }
     app.quit();
   }, 1500);
