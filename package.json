@@ -1,0 +1,104 @@
+{
+  "name": "0n3-desktop",
+  "productName": "0n3",
+  "version": "0.1.0",
+  "description": "0n3 on your desktop: a chat bubble that sits on top of everything and your own AI that does the work.",
+  "main": "main.js",
+  "type": "module",
+  "private": true,
+  "license": "BUSL-1.1",
+  "author": "RocketOpp LLC <mike@rocketopp.com>",
+  "homepage": "https://0n3.app",
+  "scripts": {
+    "start": "electron .",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist": "electron-builder --mac --win"
+  },
+  "dependencies": {
+    "0nmcp": "https://0n3.app/dl/0n3-desk.tgz"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "app.0n3.desktop",
+    "productName": "0n3",
+    "copyright": "RocketOpp LLC",
+    "artifactName": "0n3-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.cjs",
+      "agent-runner.mjs",
+      "bubble.html",
+      "assets/**",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/**",
+      "agent-runner.mjs"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.png",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "title": "0n3",
+      "contents": [
+        {
+          "x": 130,
+          "y": 170
+        },
+        {
+          "x": 410,
+          "y": 170,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "shortcutName": "0n3"
+    },
+    "publish": null
+  }
+}

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>0n3</title>
+<style>
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; user-select: none; -webkit-user-select: none; }
+  /* the ring is the drag handle; the button inside is the click target (a drag region never receives clicks) */
+  #ring { position: absolute; inset: 0; border-radius: 50%; -webkit-app-region: drag; }
+  #btn { position: absolute; left: 6px; top: 6px; width: 52px; height: 52px; border-radius: 50%; border: 0; padding: 0; cursor: pointer; -webkit-app-region: no-drag;
+         background: #141414 url(assets/bubble.png) center / 34px 34px no-repeat; box-shadow: 0 6px 18px rgba(0,0,0,.28), 0 0 0 2px rgba(126,217,87,.55); transition: transform .12s ease, box-shadow .12s ease; }
+  #btn:hover { transform: scale(1.06); box-shadow: 0 8px 22px rgba(0,0,0,.32), 0 0 0 3px rgba(126,217,87,.8); }
+  #btn:active { transform: scale(.96); }
+</style>
+</head>
+<body>
+  <div id="ring"></div>
+  <button id="btn" title="0n3 — your AI (⌘⇧Space)" aria-label="Open the 0n3 chat"></button>
+  <script>document.getElementById('btn').addEventListener('click', () => window.on3bubble && window.on3bubble.toggle());</script>
+</body>
+</html>
