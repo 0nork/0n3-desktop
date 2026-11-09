@@ -168,4 +168,16 @@ app.whenReady().then(async () => {
   await startAgent();
   // first run: open the chat so the person signs in and this computer becomes their desk
   if (agentState === 'not signed in') setTimeout(() => togglePanel(true), 800);
+  // ON3_SMOKE=<dir>: prove the shell from a script — capture the bubble and the panel, dump window state, quit.
+  if (process.env.ON3_SMOKE) setTimeout(async () => {
+    const dir = process.env.ON3_SMOKE; mkdirSync(dir, { recursive: true });
+    try {
+      togglePanel(true); await new Promise((r) => setTimeout(r, 6000));
+      writeFileSync(join(dir, 'bubble.png'), (await bubble.webContents.capturePage()).toPNG());
+      writeFileSync(join(dir, 'panel.png'), (await panel.webContents.capturePage()).toPNG());
+      const windows = BrowserWindow.getAllWindows().map((w) => ({ title: w.getTitle(), url: w.webContents.getURL(), bounds: w.getBounds(), visible: w.isVisible(), alwaysOnTop: w.isAlwaysOnTop() }));
+      writeFileSync(join(dir, 'status.json'), JSON.stringify({ windows, agentState, shim: SHIM, pkg: PKG, runner: RUNNER, status: await status() }, null, 2));
+    } catch (e) { writeFileSync(join(dir, 'error.txt'), String(e.stack || e)); }
+    app.quit();
+  }, 1500);
 });
