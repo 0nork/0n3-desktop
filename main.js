@@ -13,7 +13,7 @@
  * 0n3 command here, so the app writes a shim at ~/.0n/bin/0n3 that runs the bundled cli.js with this app's own Node.
  */
 import { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, shell, screen, nativeImage } from 'electron';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFileSync, execFile } from 'node:child_process';
 import http from 'node:http';
 import { existsSync, mkdirSync, writeFileSync, chmodSync, appendFileSync, unlinkSync, readFileSync, copyFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -120,9 +120,11 @@ async function connect(key, { token, mcp }) {
   }
   if (plan.kind === 'command') {
     const bin = which(plan.bin); if (!bin) throw new Error(`${plan.bin} is not on this computer's PATH.`);
-    const run = (args) => { try { return { ok: true, out: execFileSync(bin, args, { encoding: 'utf8', env: pathEnv(), stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }) }; } catch (e) { return { ok: false, out: `${e.stdout || ''}${e.stderr || ''}${e.message || ''}` }; } };
-    let r = run(plan.args);
-    if (!r.ok && /already exists/i.test(r.out)) { run(['mcp', 'remove', '--scope', 'user', '0n3']); r = run(plan.args); }
+    // ASYNC on purpose (2026-11-10): execFileSync here blocked Electron's main process for up to 60 s per AI, which froze the
+    // bubble, the panel and the loopback door at once — the "app freezes on Setup / Get" Mike saw.
+    const run = (args) => new Promise((resolve) => execFile(bin, args, { encoding: 'utf8', env: pathEnv(), timeout: 60_000, windowsHide: true }, (err, stdout, stderr) => resolve(err ? { ok: false, out: `${stdout || ''}${stderr || ''}${err.message || ''}` } : { ok: true, out: stdout })));
+    let r = await run(plan.args);
+    if (!r.ok && /already exists/i.test(r.out)) { await run(['mcp', 'remove', '--scope', 'user', '0n3']); r = await run(plan.args); }
     if (!r.ok) throw new Error(r.out.trim().split('\n').slice(-3).join(' ').slice(0, 300) || 'the command failed');
     let skill = null;
     if (plan.alsoSkill) { try { const t = await (await fetch(`${ON3}/api/install/skill`)).text(); mkdirSync(dirname(plan.alsoSkill), { recursive: true }); writeFileSync(plan.alsoSkill, t); skill = plan.alsoSkill; } catch (e) { log(`skill download failed: ${e.message}`); } }
