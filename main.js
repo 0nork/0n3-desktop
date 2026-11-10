@@ -236,8 +236,18 @@ function refreshTray() {
 }
 
 // ── app ──────────────────────────────────────────────────────────────────────
+// 0n3://setup — a link on 0n3.app opens this app and runs the Setup here (works in every browser, Safari included).
+function deepLink(url) {
+  const u = String(url || ''); if (!u.startsWith('0n3://')) return;
+  log(`deep link ${u}`);
+  if (!panel) makePanel();
+  if (/^0n3:\/\/setup/.test(u)) panel.loadURL(`${ON3}/chat?setup=1`);
+  togglePanel(true);
+}
+if (process.defaultApp) app.setAsDefaultProtocolClient('0n3', process.execPath, [join(HERE, 'main.js')]); else app.setAsDefaultProtocolClient('0n3');
+app.on('open-url', (e, url) => { e.preventDefault(); if (app.isReady()) deepLink(url); else app.whenReady().then(() => deepLink(url)); });
 if (!app.requestSingleInstanceLock()) app.quit();
-app.on('second-instance', () => togglePanel(true));
+app.on('second-instance', (e, argv) => { const link = (argv || []).find((a) => String(a).startsWith('0n3://')); if (link) deepLink(link); else togglePanel(true); });
 app.on('window-all-closed', () => { /* stay in the tray */ });
 app.on('will-quit', () => { globalShortcut.unregisterAll(); stopAgent(); });
 
