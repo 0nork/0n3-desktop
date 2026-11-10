@@ -127,7 +127,15 @@ async function connect(key, { token, mcp }) {
     if (!r.ok && /already exists/i.test(r.out)) { await run(['mcp', 'remove', '--scope', 'user', '0n3']); r = await run(plan.args); }
     if (!r.ok) throw new Error(r.out.trim().split('\n').slice(-3).join(' ').slice(0, 300) || 'the command failed');
     let skill = null;
-    if (plan.alsoSkill) { try { const t = await (await fetch(`${ON3}/api/install/skill`)).text(); mkdirSync(dirname(plan.alsoSkill), { recursive: true }); writeFileSync(plan.alsoSkill, t); skill = plan.alsoSkill; } catch (e) { log(`skill download failed: ${e.message}`); } }
+    if (plan.alsoSkill) {
+      // NEVER overwrite a SKILL.md the person wrote themselves (2026-11-10: this line replaced Mike's 1,000-line /0n3 skill with the
+      // public one). Only write when the file is missing or is an earlier copy of the public skill (carries its marker line).
+      try {
+        const have = existsSync(plan.alsoSkill) ? readFileSync(plan.alsoSkill, 'utf8') : '';
+        if (have && !/your connected apps, as tools|your 0n account as tools/.test(have)) log(`skill: kept the existing ${plan.alsoSkill} (not ours)`);
+        else { const t = await (await fetch(`${ON3}/api/install/skill`)).text(); if (/^---\nname: 0n3/.test(t)) { mkdirSync(dirname(plan.alsoSkill), { recursive: true }); writeFileSync(plan.alsoSkill, t); skill = plan.alsoSkill; } }
+      } catch (e) { log(`skill download failed: ${e.message}`); }
+    }
     log(`connect ${key}: ran ${plan.bin} ${plan.args.slice(0, 3).join(' ')}…${skill ? ` + skill ${skill}` : ''}`);
     return { ok: true, did: 'command', skill };
   }
