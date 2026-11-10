@@ -1,7 +1,7 @@
 {
   "name": "0n3-desktop",
   "productName": "0n3",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "0n3 on your desktop: a chat bubble that sits on top of everything and your own AI that does the work.",
   "main": "main.js",
   "type": "module",

@@ -14,6 +14,7 @@
  */
 import { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, shell, screen, nativeImage } from 'electron';
 import { spawn, execFileSync } from 'node:child_process';
+import http from 'node:http';
 import { existsSync, mkdirSync, writeFileSync, chmodSync, appendFileSync, unlinkSync, readFileSync, copyFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -132,6 +133,52 @@ async function connect(key, { token, mcp }) {
   return { ok: true, did: 'nothing', note: plan.note };
 }
 
+// ── the loopback door (2026-11-09): 0n3.app in a browser runs the same Setup through this app ─────────────────────────
+// 127.0.0.1:7473 only. Answers only to 0n3.app (CORS + Origin check) and only for the account signed in on BOTH sides:
+// every call carries the page's 0n token (x-0n3-token); its email must match the desk token's email (Rule 0-SSO: email is
+// the join key). Before the app is signed in, /login accepts a desk token from the page, exactly like the panel does.
+const LOOP_PORT = 7473;
+const LOOP_ORIGINS = new Set([ON3, ON3.replace('://', '://www.'), 'http://localhost:5173', 'http://127.0.0.1:5173']);
+const whoCache = new Map();
+async function emailOf(token) {
+  const hit = whoCache.get(token); if (hit && Date.now() - hit.at < 600_000) return hit.email;
+  const r = await fetch(`${ON3}/api/x/whoami`, { headers: { Authorization: `Bearer ${token}` } }); const j = await r.json().catch(() => ({}));
+  const email = String(j.account?.email || j.email || '').trim().toLowerCase() || null;
+  whoCache.set(token, { email, at: Date.now() }); return email;
+}
+async function sameAccount(pageToken) {
+  const { loadConfig } = await deskAgent(); const cfg = loadConfig();
+  if (!cfg?.token) return { signedIn: false, same: false };
+  const [a, b] = await Promise.all([emailOf(pageToken), emailOf(cfg.token)]);
+  return { signedIn: true, same: !!a && a === b };
+}
+function startLoopback() {
+  const send = (res, code, body) => { res.statusCode = code; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(body)); };
+  const server = http.createServer(async (req, res) => {
+    const origin = String(req.headers.origin || '');
+    if (LOOP_ORIGINS.has(origin)) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Vary', 'Origin'); }
+    res.setHeader('Access-Control-Allow-Headers', 'content-type, x-0n3-token'); res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS'); res.setHeader('Access-Control-Allow-Private-Network', 'true');
+    if (req.method === 'OPTIONS') { res.statusCode = 204; return res.end(); }
+    if (!LOOP_ORIGINS.has(origin)) return send(res, 403, { error: 'Only 0n3.app may talk to this app.' });
+    const token = String(req.headers['x-0n3-token'] || ''); if (!/^0n_/.test(token)) return send(res, 401, { error: 'Sign in to 0n3 first.' });
+    let body = ''; for await (const c of req) { body += c; if (body.length > 65536) return send(res, 413, { error: 'Too big.' }); }
+    const b = body ? (() => { try { return JSON.parse(body); } catch { return {}; } })() : {};
+    try {
+      const url = new URL(req.url, 'http://127.0.0.1'); const acct = await sameAccount(token);
+      if (url.pathname === '/status' && req.method === 'GET') return send(res, 200, { app: true, ...(await status()), sameAccount: acct.same });
+      if (url.pathname === '/login' && req.method === 'POST') { if (acct.signedIn && !acct.same) return send(res, 403, { error: 'This computer is signed in as someone else.' }); return send(res, 200, await login(String(b.token || token))); }
+      if (acct.signedIn && !acct.same) return send(res, 403, { error: 'This computer is signed in to 0n3 as a different person.' });
+      if (!acct.signedIn) return send(res, 409, { error: 'This computer is not signed in yet.', loggedIn: false });
+      if (url.pathname === '/detect' && req.method === 'GET') return send(res, 200, await detect());
+      if (url.pathname === '/connect' && req.method === 'POST') { try { return send(res, 200, await connect(String(b.key || ''), { token: b.token, mcp: b.mcp })); } catch (e) { return send(res, 200, { ok: false, error: e.message }); } }
+      return send(res, 404, { error: 'No such door.' });
+    } catch (e) { log(`loopback ${req.url}: ${e.message}`); return send(res, 500, { error: e.message }); }
+  });
+  server.on('error', (e) => log(`loopback not listening: ${e.message}`));
+  server.listen(LOOP_PORT, '127.0.0.1', () => log(`loopback door on 127.0.0.1:${LOOP_PORT}`));
+  return server;
+}
+
 // ── windows ──────────────────────────────────────────────────────────────────
 let bubble = null; let panel = null; let tray = null;
 const fromOurPage = (e) => { try { return new URL(e.senderFrame?.url || e.sender.getURL()).origin === new URL(ON3).origin || e.sender === bubble?.webContents; } catch { return false; } };
@@ -208,6 +255,7 @@ app.whenReady().then(async () => {
   tray.on('click', () => togglePanel());
   refreshTray();
   makeBubble();
+  startLoopback();
   globalShortcut.register('CommandOrControl+Shift+Space', () => togglePanel());
   await startAgent();
   // first run: open the chat so the person signs in and this computer becomes their desk
@@ -223,7 +271,10 @@ app.whenReady().then(async () => {
       // the setup path, end to end on this machine: what is found, and one settings-file write (Cursor's file, under this HOME)
       const found = await detect();
       const wrote = await connect('cursor', { token: '0n_smoketest', mcp: `${ON3}/mcp` }).catch((e) => ({ ok: false, error: e.message }));
-      writeFileSync(join(dir, 'status.json'), JSON.stringify({ windows, agentState, shim: SHIM, pkg: PKG, runner: RUNNER, status: await status(), detect: found.clients.filter((c) => c.found).map((c) => `${c.key} via ${c.via}${c.connectable ? ' → connectable' : ''}`), connectCursor: wrote, cursorFile: wrote.file && existsSync(wrote.file) ? readFileSync(wrote.file, 'utf8') : null }, null, 2));
+      // the loopback door from a "browser": the right origin without a token is 401, a wrong origin is 403, no origin is 403
+      const probe = async (headers) => { const r = await fetch(`http://127.0.0.1:${LOOP_PORT}/status`, { headers }); return r.status; };
+      const loop = { noToken: await probe({ Origin: ON3 }), wrongOrigin: await probe({ Origin: 'https://evil.example', 'x-0n3-token': '0n_x' }), preflight: (await fetch(`http://127.0.0.1:${LOOP_PORT}/detect`, { method: 'OPTIONS', headers: { Origin: ON3 } })).status };
+      writeFileSync(join(dir, 'status.json'), JSON.stringify({ windows, agentState, shim: SHIM, pkg: PKG, runner: RUNNER, status: await status(), detect: found.clients.filter((c) => c.found).map((c) => `${c.key} via ${c.via}${c.connectable ? ' → connectable' : ''}`), connectCursor: wrote, loopback: loop, cursorFile: wrote.file && existsSync(wrote.file) ? readFileSync(wrote.file, 'utf8') : null }, null, 2));
     } catch (e) { writeFileSync(join(dir, 'error.txt'), String(e.stack || e)); }
     app.quit();
   }, 1500);
