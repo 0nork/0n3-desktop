@@ -17,6 +17,14 @@ const CMDS = [
     ['Is my Mac healthy?', 'Disk, memory, battery', 'ai', 'Check this computer: free disk space, memory pressure, battery health and anything unusual running. Short report.'],
     ['Install Claude Code', 'If it is missing', 'sh', 'npm install -g @anthropic-ai/claude-code && claude --version'],
   ]],
+  ['Your AIs', [
+    ['Install Codex', 'OpenAI\'s coding agent', 'sh', 'npm install -g @openai/codex && codex --version'],
+    ['Sign in to Codex', 'Opens your browser', 'sh', 'codex login'],
+    ['Install Gemini CLI', 'Google\'s agent', 'sh', 'npm install -g @google/gemini-cli && gemini --version'],
+    ['Sign in to Gemini', 'Opens Gemini in Terminal', 'sh', MAC ? 'osascript -e \'tell application "Terminal" to do script "gemini"\' -e \'tell application "Terminal" to activate\'' : 'start cmd /k gemini'],
+    ['Sign in to Claude', 'Opens Claude in Terminal', 'sh', MAC ? 'osascript -e \'tell application "Terminal" to do script "claude"\' -e \'tell application "Terminal" to activate\'' : 'start cmd /k claude'],
+    ['Which AIs do I have?', 'Versions on this computer', 'sh', 'for b in claude codex gemini; do printf "%-8s" $b; ($b --version 2>/dev/null | head -1) || echo "not installed"; done'],
+  ]],
   ['Your business (0n3 apps)', [
     ['Today\'s briefing', 'Leads, payments, calendar', 'ai', 'Use 0n3 to give me a short briefing for today from my connected apps: new CRM leads, payments, calendar and anything that needs me. Most important first.'],
     ['Newest leads', 'From your CRM', 'ai', 'Use 0n3 to list my 10 newest CRM contacts with name, email, source and when they came in.'],
@@ -45,7 +53,8 @@ function renderCmds() {
   $('ca').onclick = () => { const n = $('cn').value.trim(); const q = $('cq').value.trim(); if (!n || !q) return; const list = mine(); list.push({ name: n, kind: q.startsWith('$') ? 'sh' : 'ai', text: q.replace(/^\$\s*/, '') }); localStorage.setItem(MINE_KEY, JSON.stringify(list)); renderCmds(); renderQuick(); };
 }
 function renderQuick() {
-  const q = [CMDS[0][1][0], CMDS[1][1][0], CMDS[1][1][4], CMDS[0][1][2], ...mine().slice(0, 2).map((m) => [m.name, '', m.kind, m.text])];
+  const all = CMDS.flatMap(([, l]) => l); const by = (n) => all.find((c) => c[0] === n);
+  const q = [by('Launch Chrome'), by('Today\'s briefing'), by('My apps'), by('What is in this folder'), ...mine().slice(0, 2).map((m) => [m.name, '', m.kind, m.text])].filter(Boolean);
   $('quick').innerHTML = q.map(([n, , k, t]) => `<button data-k="${k}" data-q="${esc(t)}">${esc(n)}</button>`).join('');
   $('quick').querySelectorAll('button').forEach((b) => (b.onclick = () => run(b.dataset.k === 'sh' ? `$ ${b.dataset.q}` : b.dataset.q)));
 }
@@ -72,7 +81,8 @@ T.onEvent((o) => {
   else if (o.t === 'out') { if (!out) { newCard(); out = document.createElement('pre'); out.className = 'out'; card.appendChild(out); } out.textContent += o.s; out.scrollTop = out.scrollHeight; }
   else if (o.t === 'shelldone') { if (card) { const m = document.createElement('div'); m.className = 'meta'; m.textContent = `exit ${o.code} · ${(o.ms / 1000).toFixed(1)}s`; card.appendChild(m); if (out && !out.textContent) out.textContent = '(no output)'; } card = null; out = null; busy(false); }
   else if (o.t === 'error') { if (!card) newCard(); const e = document.createElement('div'); e.className = 'err'; e.textContent = o.s; card.appendChild(e); }
-  else if (o.t === 'ready') { $('st').textContent = `live · ${o.model || 'Claude'} · ${o.tools} tools${(o.mcp || []).some((m) => /^0n3:connected/.test(m)) ? ' · 0n3 connected' : ''}`; $('dot').className = 'dot on'; }
+  else if (o.t === 'engine') { /* the picker already shows it */ }
+  else if (o.t === 'ready') { $('st').textContent = `live · ${o.model || 'Claude'}${o.tools ? ` · ${o.tools} tools` : ''}${(o.mcp || []).some((m) => /^0n3:connected/.test(m)) ? ' · 0n3 connected' : ''}`; $('dot').className = 'dot on'; }
   else if (o.t === 'cwd') { $('cwd').textContent = home(o.cwd, homeDir); }
   else if (o.t === 'reset') { log.innerHTML = '<div class="empty" id="empty"><b>New conversation.</b><br>Ask anything.</div>'; card = null; busy(false); }
   else if (o.t === 'exit') { if (!$('stop').disabled) busy(false); }
@@ -108,10 +118,18 @@ function show(p) {
 }
 document.querySelectorAll('.tab').forEach((t) => (t.onclick = () => show(t.dataset.p)));
 
+const ENG = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini' };
+function renderEng(i) {
+  $('eng').innerHTML = Object.keys(ENG).map((k) => `<button data-e="${k}" class="${i.engine === k ? 'on' : ''} ${i.installed?.[k] ? '' : 'off'}" title="${i.installed?.[k] ? `Talk to ${ENG[k]}` : `${ENG[k]} is not installed: see Commands → Your AIs`}">${ENG[k]}</button>`).join('');
+  $('eng').querySelectorAll('button').forEach((b) => (b.onclick = async () => { const k = b.dataset.e; if (!i.installed?.[k]) { show('cmds'); return; } try { localStorage.setItem('0n3.engine', k); } catch (e) { /* */ } const n = await T.setEngine(k); renderEng(n); $('st').textContent = `${ENG[k]} · ready`; }));
+}
 (async () => {
-  const i = await T.info(); homeDir = i.home || '';
+  let i = await T.info(); homeDir = i.home || '';
+  const savedEng = (() => { try { return localStorage.getItem('0n3.engine'); } catch (e) { return null; } })();
+  if (savedEng && savedEng !== i.engine && i.installed?.[savedEng]) i = await T.setEngine(savedEng);
+  renderEng(i);
   $('cwd').textContent = home(i.cwd, homeDir);
-  $('st').textContent = !i.claude ? 'Claude Code is not installed: see Commands' : !i.signedIn ? 'Ready (sign in to 0n3 to use your apps)' : 'Ready';
-  $('dot').className = `dot ${i.claude ? 'on' : ''}`;
+  $('st').textContent = !i.installed?.[i.engine] ? `${ENG[i.engine]} is not installed: see Commands` : !i.signedIn ? 'Ready (sign in to 0n3 to use your apps)' : 'Ready';
+  $('dot').className = `dot ${i.installed?.[i.engine] ? 'on' : ''}`;
   renderCmds(); renderQuick(); $('in').focus();
 })();

@@ -269,7 +269,7 @@ app.on('open-url', (e, url) => { e.preventDefault(); if (app.isReady()) deepLink
 if (!app.requestSingleInstanceLock()) app.quit();
 app.on('second-instance', (e, argv) => { const link = (argv || []).find((a) => String(a).startsWith(`${SCHEME}://`)); if (link) deepLink(link); else togglePanel(true); });
 app.on('window-all-closed', () => { /* stay in the tray */ });
-app.on('will-quit', () => { globalShortcut.unregisterAll(); stopAgent(); term.kill(); });
+app.on('will-quit', () => { globalShortcut.unregisterAll(); stopAgent(); term.kill(); for (const x of Object.values(term.alt)) x.kill(); });
 
 ipcMain.handle('desk:status', (e) => (fromOurPage(e) ? status() : null));
 ipcMain.handle('desk:login', (e, token) => (fromOurPage(e) ? login(token) : null));
@@ -282,6 +282,7 @@ ipcMain.handle('panel:hide', (e) => { if (fromOurPage(e)) togglePanel(false); })
 ipcMain.handle('term:info', (e) => (fromApp(e) ? term.info() : null));
 ipcMain.handle('term:send', (e, text) => (fromApp(e) ? term.send(String(text || '').slice(0, 20000)) : false));
 ipcMain.handle('term:stop', (e) => (fromApp(e) ? term.stop() : false));
+ipcMain.handle('term:engine', (e, name) => (fromApp(e) ? term.setEngine(String(name || '')) : null));
 ipcMain.handle('term:reset', (e) => (fromApp(e) ? term.reset() : false));
 ipcMain.handle('term:pick', async (e) => { if (!fromApp(e)) return null; const { dialog } = await import('electron'); const r = await dialog.showOpenDialog(panel, { properties: ['openDirectory', 'createDirectory'], defaultPath: term.cwd || WORKSPACE, title: 'The folder your terminal works in' }); return r.canceled || !r.filePaths[0] ? term.info() : term.setCwd(r.filePaths[0]); });
 ipcMain.handle('term:jobs', (e) => { if (fromApp(e) && panel) panel.loadURL(`${ON3}/chat`); });

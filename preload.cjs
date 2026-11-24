@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('on3term', {
   info: () => ipcRenderer.invoke('term:info'),
   send: (text) => ipcRenderer.invoke('term:send', String(text || '')),
   stop: () => ipcRenderer.invoke('term:stop'),
+  setEngine: (name) => ipcRenderer.invoke('term:engine', String(name || '')),
   reset: () => ipcRenderer.invoke('term:reset'),
   pickFolder: () => ipcRenderer.invoke('term:pick'),
   openJobs: () => ipcRenderer.invoke('term:jobs'),

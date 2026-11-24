@@ -19,6 +19,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
+import { GeminiEngine, CodexEngine, findBin } from './engines.mjs';
 
 const HOME = os.homedir();
 const WIN = process.platform === 'win32';
@@ -52,9 +53,22 @@ export function stepLabel(name, input = {}) {
 }
 
 export class TermSession {
-  constructor(emit) { this.emit = emit; this.p = null; this.cwd = WORKSPACE; this.started = false; this.busy = false; this.buf = ''; this.t0 = 0; this.blocks = {}; this.sh = null; }
-  info() { return { claude: !!findClaude(), cwd: this.cwd, busy: this.busy || !!this.sh, live: !!this.p, signedIn: !!desk().token, home: HOME }; }
-  setCwd(dir) { if (!dir || !existsSync(dir)) return this.info(); if (dir !== this.cwd) { this.kill(); this.started = false; this.cwd = dir; this.emit({ t: 'cwd', cwd: dir }); } return this.info(); }
+  constructor(emit) {
+    this.emit = emit; this.p = null; this.cwd = WORKSPACE; this.started = false; this.busy = false; this.buf = ''; this.t0 = 0; this.blocks = {}; this.sh = null;
+    // which AI answers: claude (this class), gemini or codex (engines.mjs). Default = the desk's chosen AI, else the first installed.
+    this.alt = { gemini: new GeminiEngine(emit), codex: new CodexEngine(emit) };
+    const want = ({ claude_code: 'claude', gemini_cli: 'gemini', codex: 'codex' })[desk().agent] || 'claude';
+    const have = this.installed();
+    this.engine = have[want] ? want : (['claude', 'codex', 'gemini'].find((k) => have[k]) || 'claude');
+  }
+  installed() { return { claude: !!findClaude(), codex: !!findBin('codex'), gemini: !!findBin('gemini') }; }
+  setEngine(name) {
+    if (!['claude', 'gemini', 'codex'].includes(name) || name === this.engine) return this.info();
+    this.stop(); this.kill(); for (const e of Object.values(this.alt)) e.kill();
+    this.engine = name; this.started = false; this.emit({ t: 'engine', engine: name }); return this.info();
+  }
+  info() { const have = this.installed(); return { claude: have.claude, installed: have, engine: this.engine, cwd: this.cwd, busy: this.busy || !!this.sh || Object.values(this.alt).some((e) => e.busy), live: !!this.p, signedIn: !!desk().token, home: HOME }; }
+  setCwd(dir) { if (!dir || !existsSync(dir)) return this.info(); if (dir !== this.cwd) { this.kill(); for (const e of Object.values(this.alt)) e.kill(); this.started = false; this.cwd = dir; this.emit({ t: 'cwd', cwd: dir }); } return this.info(); }
 
   start() {
     if (this.p) return true;
@@ -88,6 +102,7 @@ export class TermSession {
   send(text) {
     const msg = String(text || '').trim(); if (!msg) return false;
     if (msg.startsWith('$')) return this.shell(msg.replace(/^\$\s*/, ''));
+    if (this.engine !== 'claude') { mkdirSync(this.cwd, { recursive: true }); this.alt[this.engine].send(msg, this.cwd); return true; }
     if (this.busy && msg === this.last && Date.now() - this.t0 < 3000) return false; // the same line twice in a blink: one turn
     if (this.busy) { this.emit({ t: 'error', s: 'Still working on the last one. Press Stop, or wait a moment.' }); return false; }
     this.last = msg;
@@ -107,7 +122,7 @@ export class TermSession {
     this.sh.on('close', (code) => { this.sh = null; this.emit({ t: 'shelldone', code, ms: Date.now() - t0 }); });
     return true;
   }
-  stop() { if (this.sh) { try { this.sh.kill(); } catch { /* */ } } if (this.busy) this.kill(); return true; }
-  reset() { this.kill(); this.started = false; this.emit({ t: 'reset' }); return true; }
+  stop() { if (this.sh) { try { this.sh.kill(); } catch { /* */ } } if (this.busy) this.kill(); for (const e of Object.values(this.alt)) e.stop(); return true; }
+  reset() { this.kill(); for (const e of Object.values(this.alt)) e.reset(); this.started = false; this.emit({ t: 'reset' }); return true; }
   kill() { if (this.p) { try { this.p.kill(); } catch { /* */ } this.p = null; } }
 }
