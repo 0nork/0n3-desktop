@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, writeFileSync, chmodSync, appendFileSync, unlink
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import os from 'node:os';
+import { TermSession, WORKSPACE } from './term-session.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // electron-builder leaves node_modules and the runner outside app.asar (asarUnpack) so a child Node process can read them.
@@ -31,7 +32,8 @@ const HOME = os.homedir();
 const LOG = join(HOME, '.0n', 'desk', 'app.log');
 const WIN = process.platform === 'win32';
 const SHIM = WIN ? join(HOME, '.0n', 'bin', '0n3.cmd') : join(HOME, '.0n', 'bin', '0n3');
-const BUBBLE = 64; const PANEL = { w: 400, h: 620 };
+const BUBBLE = 64; const PANEL = { w: 520, h: 720 };
+const APP = join(HERE, 'app.html');
 
 const log = (s) => { try { mkdirSync(dirname(LOG), { recursive: true }); appendFileSync(LOG, `${new Date().toISOString()} ${s}\n`); } catch { /* */ } };
 let deskMod = null;
@@ -191,7 +193,12 @@ function startLoopback() {
 
 // ── windows ──────────────────────────────────────────────────────────────────
 let bubble = null; let panel = null; let tray = null;
-const fromOurPage = (e) => { try { return new URL(e.senderFrame?.url || e.sender.getURL()).origin === new URL(ON3).origin || e.sender === bubble?.webContents; } catch { return false; } };
+// THE TERMINAL (2026-11-24): the panel opens on app.html — this app's own terminal, one live Claude session (term-session.mjs).
+// The 0n3.app chat (jobs, the phone, alerts) is one tab away; the panel loads it and comes back with on3desktop.terminal().
+const term = new TermSession((o) => { if (panel && !panel.isDestroyed() && isAppUrl(panel.webContents.getURL())) panel.webContents.send('term:event', o); });
+const isAppUrl = (u) => { try { return new URL(u).protocol === 'file:' && decodeURIComponent(new URL(u).pathname).endsWith('/app.html'); } catch { return false; } };
+const fromApp = (e) => e.sender === panel?.webContents && isAppUrl(e.senderFrame?.url || e.sender.getURL());
+const fromOurPage = (e) => { try { return new URL(e.senderFrame?.url || e.sender.getURL()).origin === new URL(ON3).origin || e.sender === bubble?.webContents || fromApp(e); } catch { return false; } };
 
 function makeBubble() {
   const { workArea } = screen.getPrimaryDisplay();
@@ -203,12 +210,12 @@ function makeBubble() {
   bubble.on('closed', () => { bubble = null; });
 }
 function makePanel() {
-  panel = new BrowserWindow({ width: PANEL.w, height: PANEL.h, minWidth: 340, minHeight: 420, frame: false, alwaysOnTop: true, resizable: true, skipTaskbar: true, show: false, backgroundColor: '#fafafa', webPreferences: { preload: PRELOAD, contextIsolation: true, sandbox: true, nodeIntegration: false } });
+  panel = new BrowserWindow({ width: PANEL.w, height: PANEL.h, minWidth: 340, minHeight: 420, frame: false, alwaysOnTop: true, resizable: true, skipTaskbar: true, show: false, backgroundColor: '#0c0e0c', webPreferences: { preload: PRELOAD, contextIsolation: true, sandbox: true, nodeIntegration: false } });
   panel.setAlwaysOnTop(true, 'floating'); panel.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   panel.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:/.test(url)) shell.openExternal(url); return { action: 'deny' }; });
   // the panel shows only 0n3 pages; a link elsewhere opens in the person's browser
-  panel.webContents.on('will-navigate', (e, url) => { if (new URL(url).origin !== new URL(ON3).origin) { e.preventDefault(); shell.openExternal(url); } });
-  panel.loadURL(`${ON3}/chat`);
+  panel.webContents.on('will-navigate', (e, url) => { if (isAppUrl(url)) return; if (new URL(url).origin !== new URL(ON3).origin) { e.preventDefault(); shell.openExternal(url); } });
+  panel.loadFile(APP);
   panel.on('closed', () => { panel = null; });
 }
 function placePanel() {
@@ -231,7 +238,8 @@ function refreshTray() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label, enabled: false },
     { type: 'separator' },
-    { label: 'Show chat', accelerator: 'CommandOrControl+Shift+Space', click: () => togglePanel(true) },
+    { label: 'Open the terminal', accelerator: 'CommandOrControl+Shift+Space', click: () => { if (!panel) makePanel(); else if (!isAppUrl(panel.webContents.getURL())) panel.loadFile(APP); togglePanel(true); } },
+    { label: 'Jobs & phone (0n3 chat)', click: () => { if (!panel) makePanel(); panel.loadURL(`${ON3}/chat`); togglePanel(true); } },
     { label: 'Open 0n3.app', click: () => shell.openExternal(ON3) },
     { label: 'Open 0nCanvas', click: () => shell.openExternal(`${ON3}/canvas`) },
     { label: 'Alerts', click: () => shell.openExternal(`${ON3}/alerts`) },
@@ -261,7 +269,7 @@ app.on('open-url', (e, url) => { e.preventDefault(); if (app.isReady()) deepLink
 if (!app.requestSingleInstanceLock()) app.quit();
 app.on('second-instance', (e, argv) => { const link = (argv || []).find((a) => String(a).startsWith(`${SCHEME}://`)); if (link) deepLink(link); else togglePanel(true); });
 app.on('window-all-closed', () => { /* stay in the tray */ });
-app.on('will-quit', () => { globalShortcut.unregisterAll(); stopAgent(); });
+app.on('will-quit', () => { globalShortcut.unregisterAll(); stopAgent(); term.kill(); });
 
 ipcMain.handle('desk:status', (e) => (fromOurPage(e) ? status() : null));
 ipcMain.handle('desk:login', (e, token) => (fromOurPage(e) ? login(token) : null));
@@ -270,6 +278,14 @@ ipcMain.handle('desk:detect', (e) => (fromOurPage(e) ? detect() : null));
 ipcMain.handle('desk:connect', async (e, key, o) => { if (!fromOurPage(e)) return null; try { return await connect(String(key || ''), o || {}); } catch (err) { log(`connect ${key} failed: ${err.message}`); return { ok: false, error: err.message }; } });
 ipcMain.handle('bubble:toggle', (e) => { if (fromOurPage(e)) togglePanel(); });
 ipcMain.handle('panel:hide', (e) => { if (fromOurPage(e)) togglePanel(false); });
+// the terminal's own calls: only from app.html in the panel
+ipcMain.handle('term:info', (e) => (fromApp(e) ? term.info() : null));
+ipcMain.handle('term:send', (e, text) => (fromApp(e) ? term.send(String(text || '').slice(0, 20000)) : false));
+ipcMain.handle('term:stop', (e) => (fromApp(e) ? term.stop() : false));
+ipcMain.handle('term:reset', (e) => (fromApp(e) ? term.reset() : false));
+ipcMain.handle('term:pick', async (e) => { if (!fromApp(e)) return null; const { dialog } = await import('electron'); const r = await dialog.showOpenDialog(panel, { properties: ['openDirectory', 'createDirectory'], defaultPath: term.cwd || WORKSPACE, title: 'The folder your terminal works in' }); return r.canceled || !r.filePaths[0] ? term.info() : term.setCwd(r.filePaths[0]); });
+ipcMain.handle('term:jobs', (e) => { if (fromApp(e) && panel) panel.loadURL(`${ON3}/chat`); });
+ipcMain.handle('panel:terminal', (e) => { if (fromOurPage(e) && panel) panel.loadFile(APP); });
 
 app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock?.hide();
@@ -282,6 +298,25 @@ app.whenReady().then(async () => {
   await startAgent();
   // first run: open the chat so the person signs in and this computer becomes their desk
   if (agentState === 'not signed in') setTimeout(() => togglePanel(true), 800);
+  // ON3_TERM_SHOT=<dir>: prove the terminal — open it, say one thing, run one command, capture each, quit.
+  if (process.env.ON3_TERM_SHOT) setTimeout(async () => {
+    const dir = process.env.ON3_TERM_SHOT; mkdirSync(dir, { recursive: true });
+    try {
+      togglePanel(true); await new Promise((r) => setTimeout(r, 2500));
+      writeFileSync(join(dir, '1-open.png'), (await panel.webContents.capturePage()).toPNG());
+      await panel.webContents.executeJavaScript("document.getElementById('in').value='Use 0n3 to tell me which account I am signed in as, in one short sentence.';document.getElementById('f').requestSubmit();true");
+      await new Promise((r) => setTimeout(r, 20000));
+      writeFileSync(join(dir, '2-answer.png'), (await panel.webContents.capturePage()).toPNG());
+      await panel.webContents.executeJavaScript("document.getElementById('in').value='Thanks. Now list three things you could do for me on this computer, one line each.';document.getElementById('f').requestSubmit();true");
+      await new Promise((r) => setTimeout(r, 9000));
+      await panel.webContents.executeJavaScript("document.getElementById('in').value='$ echo terminal ok && sw_vers -productVersion';document.getElementById('f').requestSubmit();true");
+      await new Promise((r) => setTimeout(r, 2500));
+      writeFileSync(join(dir, '2b-followup.png'), (await panel.webContents.capturePage()).toPNG());
+      await panel.webContents.executeJavaScript("document.querySelector('.tab[data-p=cmds]').click();true"); await new Promise((r) => setTimeout(r, 800));
+      writeFileSync(join(dir, '3-commands.png'), (await panel.webContents.capturePage()).toPNG());
+    } catch (e) { writeFileSync(join(dir, 'error.txt'), String(e.stack || e)); }
+    app.quit();
+  }, 1500);
   // ON3_SMOKE=<dir>: prove the shell from a script — capture the bubble and the panel, dump window state, quit.
   if (process.env.ON3_SMOKE) setTimeout(async () => {
     const dir = process.env.ON3_SMOKE; mkdirSync(dir, { recursive: true });
