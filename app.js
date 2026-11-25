@@ -179,3 +179,26 @@ function renderEng(i) {
   $('dot').className = `dot ${i.installed?.[i.engine] ? 'on' : ''}`;
   renderCmds(); renderQuick(); $('in').focus();
 })();
+
+// ── UPDATE NOW (0.7.0) ────────────────────────────────────────────────────────────────────────────────────────────────
+// The button appears in the top bar when a newer version is out (checked at start and every six hours). Pressing it
+// downloads the new version with a progress bar, swaps it in and restarts 0n3; nothing is asked of the person in between.
+const A = window.on3app;
+if (A) {
+  let state = null;
+  const paintBtn = () => { const b = $('upd'); if (!state || !state.available) { b.hidden = true; return; } b.hidden = false; b.innerHTML = `Update now<small>${esc(state.version)}</small>`; b.title = state.notes ? `${state.title}: ${state.notes}` : `Download ${state.version} and restart 0n3`; };
+  const bar = (pct, text, bad) => { $('ufill').style.width = `${Math.max(3, Math.min(100, pct))}%`; const t = $('utext'); t.textContent = text; t.classList.toggle('uerr', !!bad); };
+  const start = async () => {
+    if (!$('stop').disabled && !window.confirm('Your AI is in the middle of something. Updating restarts 0n3 and stops it. Update anyway?')) return;
+    $('utitle').textContent = `Updating 0n3 to ${state?.version || 'the new version'}`; $('urow').hidden = true; bar(0, 'Starting…'); $('updov').classList.add('on');
+    const r = await A.updateInstall();
+    if (r && !r.ok) { bar(0, r.error || 'The update did not go through.', true); $('urow').hidden = false; $('uretry').hidden = !!r.manual; }
+  };
+  A.onUpdate((o) => {
+    if (o.t === 'state') { state = o; paintBtn(); }
+    else if (o.t === 'progress') bar(o.pct, o.text);
+    else if (o.t === 'error') { bar(0, o.text, true); $('urow').hidden = false; $('uretry').hidden = false; }
+  });
+  $('upd').onclick = start; $('uretry').onclick = start; $('uclose').onclick = () => $('updov').classList.remove('on');
+  A.updateState().then((s) => { state = s; paintBtn(); }).catch(() => {});
+}

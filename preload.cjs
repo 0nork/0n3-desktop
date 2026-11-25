@@ -14,6 +14,16 @@ contextBridge.exposeInMainWorld('on3desktop', {
 });
 contextBridge.exposeInMainWorld('on3bubble', { toggle: () => ipcRenderer.invoke('bubble:toggle') });
 
+// THE START SCREEN (splash.html): main reports each real start-up step.
+contextBridge.exposeInMainWorld('on3splash', { on: (cb) => { ipcRenderer.on('splash', (_e, o) => cb(o)); } });
+// UPDATE NOW (app.html): is there a newer version, install it, and its progress.
+contextBridge.exposeInMainWorld('on3app', {
+  updateState: () => ipcRenderer.invoke('update:state'),
+  updateCheck: () => ipcRenderer.invoke('update:check'),
+  updateInstall: () => ipcRenderer.invoke('update:install'),
+  onUpdate: (cb) => { const h = (_e, o) => cb(o); ipcRenderer.on('app:update', h); return () => ipcRenderer.removeListener('app:update', h); },
+});
+
 // THE TERMINAL (app.html only; main checks the sender page on every call)
 contextBridge.exposeInMainWorld('on3term', {
   info: () => ipcRenderer.invoke('term:info'),

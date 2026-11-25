@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'none'">
+<title>0n3</title>
+<style>
+/* THE START SCREEN (0.7.0). Mike: "something that at least shows the logo and a progress bar saying 'installing' when it's
+   run." The bar follows the real start-up steps main.js reports; nothing here loops forever. */
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:transparent;font:14px/1.45 -apple-system,Inter,system-ui,sans-serif;color:#eef3ee;-webkit-user-select:none;user-select:none;-webkit-app-region:drag}
+.card{position:absolute;inset:10px;border-radius:22px;background:radial-gradient(120% 120% at 20% 0%,#16301a 0%,#0c0e0c 55%),#0c0e0c;border:1px solid #26302a;box-shadow:0 18px 50px rgba(0,0,0,.55);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:28px;overflow:hidden}
+.logo{height:44px;opacity:0;transform:translateY(8px) scale(.94);transition:opacity .5s ease,transform .6s cubic-bezier(.2,.9,.2,1)}
+.on .logo{opacity:1;transform:none}
+h1{margin:6px 0 0;font-size:17px;font-weight:700;letter-spacing:.01em;text-align:center}
+.bar{width:100%;max-width:300px;height:8px;border-radius:99px;background:#1c231d;overflow:hidden;border:1px solid #26302a}
+.fill{height:100%;width:4%;border-radius:99px;background:linear-gradient(90deg,#408b1f,#7ed957);box-shadow:0 0 14px rgba(126,217,87,.55);transition:width .45s cubic-bezier(.4,0,.2,1)}
+.step{min-height:20px;font-size:13px;color:#9aa69b;text-align:center;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.ver{position:absolute;bottom:14px;font-size:11px;color:#5f6a61;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.done .fill{width:100%!important}.done .step{color:#7ed957}
+</style>
+</head>
+<body>
+<div class="card" id="card">
+  <img class="logo" src="assets/logo-light.png" alt="0n3">
+  <h1 id="title">Starting 0n3</h1>
+  <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="4" id="bar"><div class="fill" id="fill"></div></div>
+  <div class="step" id="step">Getting things ready…</div>
+  <div class="ver" id="ver"></div>
+</div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  requestAnimationFrame(() => $('card').classList.add('on'));
+  window.on3splash && window.on3splash.on((o) => {
+    if (o.title) $('title').textContent = o.title;
+    if (o.version) $('ver').textContent = o.version;
+    if (o.text) $('step').textContent = o.text;
+    if (o.pct != null) { $('fill').style.width = Math.max(4, Math.min(100, o.pct)) + '%'; $('bar').setAttribute('aria-valuenow', String(Math.round(o.pct))); }
+    if (o.done) $('card').classList.add('done');
+  });
+</script>
+</body>
+</html>

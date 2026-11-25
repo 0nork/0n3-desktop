@@ -20,6 +20,7 @@ import { join, dirname, basename, extname, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import os from 'node:os';
 import { TermSession, WORKSPACE } from './term-session.mjs';
+import * as updater from './updater.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // electron-builder leaves node_modules and the runner outside app.asar (asarUnpack) so a child Node process can read them.
@@ -200,6 +201,56 @@ const isAppUrl = (u) => { try { return new URL(u).protocol === 'file:' && decode
 const fromApp = (e) => e.sender === panel?.webContents && isAppUrl(e.senderFrame?.url || e.sender.getURL());
 const fromOurPage = (e) => { try { return new URL(e.senderFrame?.url || e.sender.getURL()).origin === new URL(ON3).origin || e.sender === bubble?.webContents || fromApp(e); } catch { return false; } };
 
+// ── THE START SCREEN (0.7.0) ──────────────────────────────────────────────────────────────────────────────────────────
+// Mike: "I want this application to go through an installation process when called … something that at least shows the logo
+// and progress bar saying 'installing' when it's run." A small window with the logo and a bar that follows the REAL start-up
+// steps. The first time a version runs on this computer it says "Installing 0n3 x.y.z" (that is what is happening: the
+// `0n3` command is written and your AI programs are found); after that it says "Starting 0n3".
+let splash = null;
+const VERSION_FILE = join(HOME, '.0n', 'desk', 'app-version');
+const lastRunVersion = () => { try { return readFileSync(VERSION_FILE, 'utf8').trim(); } catch { return ''; } };
+function makeSplash() {
+  const { workArea } = screen.getPrimaryDisplay(); const w = 420; const h = 300;
+  splash = new BrowserWindow({ width: w, height: h, x: Math.round(workArea.x + (workArea.width - w) / 2), y: Math.round(workArea.y + (workArea.height - h) / 2), frame: false, transparent: true, resizable: false, alwaysOnTop: true, skipTaskbar: true, show: false, hasShadow: false, webPreferences: { preload: PRELOAD, contextIsolation: true, sandbox: true, nodeIntegration: false } });
+  splash.on('closed', () => { splash = null; });
+  const ready = new Promise((ok) => splash.webContents.once('did-finish-load', ok));
+  splash.loadFile(join(HERE, 'splash.html'));
+  splash.once('ready-to-show', () => splash && splash.show());
+  return ready;
+}
+const splashSay = (o) => { try { if (splash && !splash.isDestroyed()) splash.webContents.send('splash', o); } catch { /* closing */ } };
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ── UPDATE NOW (0.7.0, updater.mjs) ───────────────────────────────────────────────────────────────────────────────────
+let upd = { available: false, current: app.getVersion() }; let updBusy = false;
+const updView = () => ({ ...upd, current: app.getVersion(), busy: updBusy });
+const updSay = (o) => { try { if (panel && !panel.isDestroyed() && isAppUrl(panel.webContents.getURL())) panel.webContents.send('app:update', o); } catch { /* closing */ } };
+async function checkForUpdate() {
+  if (updBusy) return updView();
+  try { upd = await updater.check({ current: app.getVersion() }); } catch (e) { upd = { available: false, current: app.getVersion(), error: e.message }; }
+  if (upd.error) log(`update check: ${upd.error}`); else if (upd.available) log(`update available: ${upd.version}`);
+  refreshTray(); updSay({ t: 'state', ...updView() });
+  return updView();
+}
+async function installUpdate() {
+  if (updBusy) return { ok: false, error: 'An update is already being installed.' };
+  if (!upd.available) await checkForUpdate();
+  if (!upd.available) return { ok: false, error: upd.error || 'You already have the newest version.' };
+  const target = updater.installTarget();
+  if (!target.ok || !upd.asset) { shell.openExternal(upd.page || updater.RELEASES_PAGE); return { ok: false, manual: true, error: target.ok ? 'There is no download for this kind of computer in that release. The download page is open in your browser.' : `${target.why} The download page is open in your browser.` }; }
+  updBusy = true; const tmp = join(app.getPath('temp'), `0n3-update-${upd.version}`);
+  try {
+    updSay({ t: 'progress', pct: 0, text: `Downloading 0n3 ${upd.version}…` });
+    const file = await updater.download(upd.asset, tmp, ({ pct, got, total }) => updSay({ t: 'progress', pct: Math.round(pct * 0.9), text: `Downloading 0n3 ${upd.version}… ${pct}%${total ? ` of ${Math.round(total / 1048576)} MB` : ''}`, got }));
+    updSay({ t: 'progress', pct: 93, text: 'Installing…' });
+    const r = await updater.install({ file, version: upd.version, target, tmp });
+    log(`update ${upd.version}: ${r.restart} started; quitting`);
+    updSay({ t: 'progress', pct: 100, text: 'Installed. 0n3 is restarting…', done: true });
+    setTimeout(() => app.quit(), 900);
+    return { ok: true };
+  } catch (e) { updBusy = false; log(`update failed: ${e.message}`); updSay({ t: 'error', text: e.message }); return { ok: false, error: e.message }; }
+}
+
 function makeBubble() {
   const { workArea } = screen.getPrimaryDisplay();
   bubble = new BrowserWindow({ width: BUBBLE, height: BUBBLE, x: workArea.x + workArea.width - BUBBLE - 24, y: workArea.y + workArea.height - BUBBLE - 24, frame: false, transparent: true, alwaysOnTop: true, resizable: false, movable: true, skipTaskbar: true, hasShadow: false, show: false, webPreferences: { preload: PRELOAD, contextIsolation: true, sandbox: true, nodeIntegration: false } });
@@ -238,6 +289,7 @@ function refreshTray() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label, enabled: false },
     { type: 'separator' },
+    ...(upd.available ? [{ label: `Update to ${upd.version} now`, click: () => { if (!panel) makePanel(); else if (!isAppUrl(panel.webContents.getURL())) panel.loadFile(APP); togglePanel(true); setTimeout(() => installUpdate(), 600); } }, { type: 'separator' }] : []),
     { label: 'Open the terminal', accelerator: 'CommandOrControl+Shift+Space', click: () => { if (!panel) makePanel(); else if (!isAppUrl(panel.webContents.getURL())) panel.loadFile(APP); togglePanel(true); } },
     { label: 'Jobs & phone (0n3 chat)', click: () => { if (!panel) makePanel(); panel.loadURL(`${ON3}/chat`); togglePanel(true); } },
     { label: 'Open 0n3.app', click: () => shell.openExternal(ON3) },
@@ -264,9 +316,10 @@ function deepLink(url) {
   if (u.startsWith(`${SCHEME}://setup`)) panel.loadURL(`${ON3}/chat?setup=1`);
   togglePanel(true);
 }
-if (process.defaultApp) app.setAsDefaultProtocolClient(SCHEME, process.execPath, [join(HERE, 'main.js')]); else app.setAsDefaultProtocolClient(SCHEME);
+// (the start-screen proof run registers nothing: it must not take the 0n3:// links away from the installed app)
+if (!process.env.ON3_SPLASH_SHOT) { if (process.defaultApp) app.setAsDefaultProtocolClient(SCHEME, process.execPath, [join(HERE, 'main.js')]); else app.setAsDefaultProtocolClient(SCHEME); }
 app.on('open-url', (e, url) => { e.preventDefault(); if (app.isReady()) deepLink(url); else app.whenReady().then(() => deepLink(url)); });
-if (!app.requestSingleInstanceLock()) app.quit();
+if (!process.env.ON3_SPLASH_SHOT && !app.requestSingleInstanceLock()) app.quit();
 app.on('second-instance', (e, argv) => { const link = (argv || []).find((a) => String(a).startsWith(`${SCHEME}://`)); if (link) deepLink(link); else togglePanel(true); });
 app.on('window-all-closed', () => { /* stay in the tray */ });
 app.on('will-quit', () => { globalShortcut.unregisterAll(); stopAgent(); term.kill(); for (const x of Object.values(term.alt)) x.kill(); });
@@ -279,6 +332,9 @@ ipcMain.handle('desk:connect', async (e, key, o) => { if (!fromOurPage(e)) retur
 ipcMain.handle('bubble:toggle', (e) => { if (fromOurPage(e)) togglePanel(); });
 ipcMain.handle('panel:hide', (e) => { if (fromOurPage(e)) togglePanel(false); });
 // the terminal's own calls: only from app.html in the panel
+ipcMain.handle('update:state', (e) => (fromApp(e) ? updView() : null));
+ipcMain.handle('update:check', (e) => (fromApp(e) ? checkForUpdate() : null));
+ipcMain.handle('update:install', (e) => (fromApp(e) ? installUpdate() : null));
 ipcMain.handle('term:info', (e) => (fromApp(e) ? term.info() : null));
 ipcMain.handle('term:send', (e, text) => (fromApp(e) ? term.send(String(text || '').slice(0, 20000)) : false));
 ipcMain.handle('term:stop', (e) => (fromApp(e) ? term.stop() : false));
@@ -302,13 +358,40 @@ ipcMain.handle('panel:terminal', (e) => { if (fromOurPage(e) && panel) panel.loa
 
 app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock?.hide();
+  const version = app.getVersion(); const fresh = lastRunVersion() !== version; const t0 = Date.now();
+  const title = fresh ? `Installing 0n3 ${version}` : 'Starting 0n3';
+  // ON3_SPLASH_SHOT=<dir>: prove the start screen and nothing else — no tray, no bubble, no agent. Captures each step, quits.
+  if (process.env.ON3_SPLASH_SHOT) {
+    const dir = process.env.ON3_SPLASH_SHOT; mkdirSync(dir, { recursive: true });
+    try {
+      await makeSplash(); await pause(700);
+      const shots = [[12, 'Getting things ready…'], [45, 'Looking for the AI programs on this computer…'], [72, 'Starting your desk…'], [100, 'Ready']];
+      for (const [i, [pct, text]] of shots.entries()) { splashSay({ title: process.env.ON3_SPLASH_TITLE || title, version: `v${version}`, pct, text, done: pct === 100 }); await pause(650); writeFileSync(join(dir, `splash-${i + 1}.png`), (await splash.webContents.capturePage()).toPNG()); }
+    } catch (e) { writeFileSync(join(dir, 'error.txt'), String(e.stack || e)); }
+    app.exit(0); return;
+  }
+  await makeSplash();
+  const step = (pct, text) => splashSay({ title, version: `v${version}`, pct, text });
+  step(10, fresh ? 'Setting up the 0n3 command…' : 'Getting things ready…');
   tray = new Tray(nativeImage.createFromPath(join(HERE, 'assets', 'tray.png')));
   tray.on('click', () => togglePanel());
   refreshTray();
-  makeBubble();
+  try { writeShim(); } catch (e) { log(`shim: ${e.message}`); }
   startLoopback();
   globalShortcut.register('CommandOrControl+Shift+Space', () => togglePanel());
+  step(35, 'Looking for the AI programs on this computer…');
+  try { await Promise.race([detect(), pause(6000)]); } catch (e) { log(`detect: ${e.message}`); }
+  step(60, 'Starting your desk…');
   await startAgent();
+  step(82, 'Checking for a newer version…');
+  await Promise.race([checkForUpdate(), pause(5000)]);
+  setInterval(() => checkForUpdate().catch(() => {}), 6 * 60 * 60 * 1000); // and again every six hours while the app stays open
+  await pause(Math.max(0, 1800 - (Date.now() - t0))); // long enough to be read, never longer than the work plus this
+  splashSay({ title, version: `v${version}`, pct: 100, text: upd.available ? `Ready. Version ${upd.version} is available.` : 'Ready', done: true });
+  await pause(650);
+  try { mkdirSync(dirname(VERSION_FILE), { recursive: true }); writeFileSync(VERSION_FILE, version); } catch (e) { log(`version file: ${e.message}`); }
+  if (splash && !splash.isDestroyed()) splash.close();
+  makeBubble();
   // first run: open the chat so the person signs in and this computer becomes their desk
   if (agentState === 'not signed in') setTimeout(() => togglePanel(true), 800);
   // ON3_TERM_SHOT=<dir>: prove the terminal — open it, say one thing, run one command, capture each, quit.

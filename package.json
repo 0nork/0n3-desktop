@@ -1,7 +1,7 @@
 {
   "name": "0n3-desktop",
   "productName": "0n3",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "0n3 on your desktop: a chat bubble that sits on top of everything and your own AI that does the work.",
   "main": "main.js",
   "type": "module",
@@ -13,7 +13,8 @@
     "start": "electron .",
     "dist:mac": "electron-builder --mac",
     "dist:win": "electron-builder --win",
-    "dist": "electron-builder --mac --win"
+    "dist": "electron-builder --mac --win",
+    "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {
     "electron": "^33.2.0",
@@ -37,6 +38,8 @@
       "app.js",
       "term-session.mjs",
       "engines.mjs",
+      "updater.mjs",
+      "splash.html",
       "assets/**",
       "package.json"
     ],
