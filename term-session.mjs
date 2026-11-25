@@ -115,6 +115,7 @@ export class TermSession {
     if (this.sh) { this.emit({ t: 'error', s: 'A command is still running. Press Stop first.' }); return false; }
     const t0 = Date.now(); this.emit({ t: 'shell', s: cmd });
     const sh = WIN ? 'cmd.exe' : (process.env.SHELL || '/bin/zsh');
+    mkdirSync(this.cwd, { recursive: true }); // a $ command before any AI message: the workspace folder may not exist yet, and spawn then fails as "spawn /bin/zsh ENOENT"
     this.sh = spawn(sh, WIN ? ['/d', '/s', '/c', cmd] : ['-lc', cmd], { cwd: this.cwd, env: env(), stdio: ['ignore', 'pipe', 'pipe'] });
     this.sh.stdout.on('data', (d) => this.emit({ t: 'out', s: String(d) }));
     this.sh.stderr.on('data', (d) => this.emit({ t: 'out', s: String(d) }));
