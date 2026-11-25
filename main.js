@@ -15,8 +15,8 @@
 import { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, shell, screen, nativeImage } from 'electron';
 import { spawn, execFileSync, execFile } from 'node:child_process';
 import http from 'node:http';
-import { existsSync, mkdirSync, writeFileSync, chmodSync, appendFileSync, unlinkSync, readFileSync, copyFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { existsSync, mkdirSync, writeFileSync, chmodSync, appendFileSync, unlinkSync, readFileSync, copyFileSync, statSync } from 'node:fs';
+import { join, dirname, basename, extname, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import os from 'node:os';
 import { TermSession, WORKSPACE } from './term-session.mjs';
@@ -285,6 +285,18 @@ ipcMain.handle('term:stop', (e) => (fromApp(e) ? term.stop() : false));
 ipcMain.handle('term:engine', (e, name) => (fromApp(e) ? term.setEngine(String(name || '')) : null));
 ipcMain.handle('term:reset', (e) => (fromApp(e) ? term.reset() : false));
 ipcMain.handle('term:pick', async (e) => { if (!fromApp(e)) return null; const { dialog } = await import('electron'); const r = await dialog.showOpenDialog(panel, { properties: ['openDirectory', 'createDirectory'], defaultPath: term.cwd || WORKSPACE, title: 'The folder your terminal works in' }); return r.canceled || !r.filePaths[0] ? term.info() : term.setCwd(r.filePaths[0]); });
+// Dropped onto the terminal: say what each path is (folder, image or file) so the page can show it and the AI is told the kind.
+const IMG = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.heic', '.heif', '.bmp', '.tif', '.tiff', '.svg', '.avif']);
+function describeDrop(paths) {
+  const out = []; const seen = new Set();
+  for (const p of (Array.isArray(paths) ? paths : []).slice(0, 60)) {
+    const path = String(p || ''); if (!path || !isAbsolute(path) || seen.has(path)) continue; seen.add(path);
+    try { const st = statSync(path); out.push({ path, name: basename(path) || path, kind: st.isDirectory() ? 'folder' : IMG.has(extname(path).toLowerCase()) ? 'image' : 'file', size: st.isDirectory() ? null : st.size }); }
+    catch (err) { log(`drop: cannot read ${path}: ${err.message}`); }
+  }
+  return out;
+}
+ipcMain.handle('term:attach', (e, paths) => (fromApp(e) ? describeDrop(paths) : []));
 ipcMain.handle('term:jobs', (e) => { if (fromApp(e) && panel) panel.loadURL(`${ON3}/chat`); });
 ipcMain.handle('panel:terminal', (e) => { if (fromOurPage(e) && panel) panel.loadFile(APP); });
 

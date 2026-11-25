@@ -95,7 +95,53 @@ function run(text) {
   sending = true; setTimeout(() => { sending = false; }, 600);
   hist.unshift(text); hi = -1; T.send(text);
 }
-$('f').onsubmit = (e) => { e.preventDefault(); const v = $('in').value; $('in').value = ''; grow(); run(v); };
+// ── attachments: whatever was dropped rides along with the next message as real paths the AI can open ─────────────────
+let atts = [];
+const GLYPH = { folder: '▣', image: '◩', file: '▤' };
+const sizeOf = (n) => (n == null ? '' : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(0)} KB` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} MB` : `${(n / 1073741824).toFixed(1)} GB`);
+function renderAtts() {
+  const box = $('atts'); box.classList.toggle('on', atts.length > 0);
+  box.innerHTML = atts.map((a, i) => `<span class="att" title="${esc(a.path)}"><i>${GLYPH[a.kind] || GLYPH.file}</i><span>${esc(a.name)}</span>${a.size != null ? `<small>${sizeOf(a.size)}</small>` : '<small>folder</small>'}<button type="button" data-i="${i}" title="Remove">×</button></span>`).join('');
+  box.querySelectorAll('button').forEach((b) => (b.onclick = () => { atts.splice(Number(b.dataset.i), 1); renderAtts(); $('in').focus(); }));
+}
+/** The message the AI gets: the kind and the full path of each thing, then what the person typed. */
+function withAtts(text) {
+  if (!atts.length) return text;
+  const list = atts.map((a) => `- ${a.kind}: ${a.path}${a.kind === 'folder' ? '/' : ''}`).join('\n');
+  return `Attached (dropped into the app; open them from these paths):\n${list}\n\n${text.trim() || 'Look at what I attached and tell me what it is.'}`;
+}
+$('f').onsubmit = (e) => {
+  e.preventDefault(); const v = $('in').value; const shell = v.trim().startsWith('$');
+  if (!v.trim() && !atts.length) return;
+  if (sending) return; // run() would drop it: keep the text and the attachments for the next press
+  $('in').value = ''; grow();
+  if (shell || !atts.length) { run(v); return; }
+  run(withAtts(v)); atts = []; renderAtts();
+};
+
+// ── the drop screen ───────────────────────────────────────────────────────────────────────────────────────────────────
+const drop = $('drop'); const plus = $('plus'); let depth = 0; let raf = 0;
+const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
+const showDrop = (on) => { drop.classList.remove('out'); drop.classList.toggle('on', on); if (!on) { depth = 0; plus.style.setProperty('--rx', '0deg'); plus.style.setProperty('--ry', '0deg'); } };
+window.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); depth += 1; showDrop(true); });
+window.addEventListener('dragover', (e) => {
+  if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy';
+  if (!drop.classList.contains('on')) showDrop(true);
+  const x = e.clientX; const y = e.clientY;
+  if (!raf) raf = requestAnimationFrame(() => { raf = 0; plus.style.setProperty('--ry', `${((x / innerWidth) - 0.5) * 32}deg`); plus.style.setProperty('--rx', `${(0.5 - (y / innerHeight)) * 22}deg`); });
+});
+window.addEventListener('dragleave', (e) => { if (!hasFiles(e)) return; depth = Math.max(0, depth - 1); if (!depth || e.relatedTarget === null) showDrop(false); });
+window.addEventListener('dragend', () => showDrop(false));
+window.addEventListener('drop', async (e) => {
+  if (!hasFiles(e)) return; e.preventDefault();
+  const paths = Array.from(e.dataTransfer.files || []).map((f) => T.pathFor(f)).filter(Boolean);
+  showDrop(false); drop.classList.add('out'); // dropped: clear the screen quickly, the slow fade is only for arriving
+  if (!paths.length) { bubble('That could not be attached: it has no location on this computer (drag it from Finder or your desktop).', 'err'); return; }
+  const got = await T.attach(paths);
+  for (const a of got || []) if (!atts.some((x) => x.path === a.path)) atts.push(a);
+  if ((got || []).length < paths.length) bubble(`${paths.length - (got || []).length} of ${paths.length} could not be read and were left out.`, 'err');
+  show('term'); renderAtts(); $('in').focus();
+});
 const grow = () => { const t = $('in'); t.style.height = 'auto'; t.style.height = `${Math.min(t.scrollHeight, 180)}px`; };
 $('in').addEventListener('input', grow);
 $('in').addEventListener('keydown', (e) => {

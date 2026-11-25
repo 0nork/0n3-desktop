@@ -1,5 +1,5 @@
 // The bridge the 0n3 pages see inside the desktop app. Nothing else from Node reaches the page.
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('on3desktop', {
   status: () => ipcRenderer.invoke('desk:status'),
@@ -22,6 +22,9 @@ contextBridge.exposeInMainWorld('on3term', {
   setEngine: (name) => ipcRenderer.invoke('term:engine', String(name || '')),
   reset: () => ipcRenderer.invoke('term:reset'),
   pickFolder: () => ipcRenderer.invoke('term:pick'),
+  // drag and drop: the real path of each dropped File, then what main says it is ({ path, name, kind: folder|image|file, size })
+  pathFor: (file) => { try { return webUtils.getPathForFile(file) || ''; } catch (e) { return ''; } },
+  attach: (paths) => ipcRenderer.invoke('term:attach', (Array.isArray(paths) ? paths : []).map(String)),
   openJobs: () => ipcRenderer.invoke('term:jobs'),
   hide: () => ipcRenderer.invoke('panel:hide'),
   onEvent: (cb) => { const h = (_e, o) => cb(o); ipcRenderer.on('term:event', h); return () => ipcRenderer.removeListener('term:event', h); },
