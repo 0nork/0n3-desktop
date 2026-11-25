@@ -233,3 +233,38 @@ if (A) {
   $('upd').onclick = start; $('uretry').onclick = start; $('uclose').onclick = () => $('updov').classList.remove('on');
   A.updateState().then((s) => { state = s; paintBtn(); }).catch(() => {});
 }
+
+// ── SETTINGS (0.9.0, Mike 2026-11-25): color theme, corner icon, updates ──────────────────────────────────────────────
+// The themes and icons are looks.js's lists (the bubble paints from the same file). The choice is kept by the main process
+// and sent to both windows, so the corner button changes the moment a card is clicked here.
+const LK = window.LOOKS; const KL = window.on3look; let look = LK.read();
+function markLook() {
+  document.querySelectorAll('.th').forEach((b) => b.classList.toggle('on', b.dataset.theme === look.theme));
+  document.querySelectorAll('.ic').forEach((b) => b.classList.toggle('on', b.dataset.icon === look.icon));
+}
+async function setLook(part) {
+  look = LK.apply({ ...look, ...part }); markLook();
+  if (KL) { const saved = await KL.set(look).catch(() => null); if (!saved) bubble('That choice could not be saved, so it will not be remembered after a restart.', 'err'); }
+}
+function sayVersion(s) {
+  if (!s) return;
+  $('ver').textContent = `0n3 ${s.current || ''}`.trim();
+  $('verNote').textContent = s.error ? `Could not check for a new version: ${s.error}` : s.available ? `Version ${s.version} is ready. Press Update now at the top.` : 'You have the newest version.';
+}
+function renderSet() {
+  const th = Object.entries(LK.THEMES).map(([id, t]) => `<button class="th" data-theme="${id}" style="--c:${LK.hex(t.rgb)}"><i style="${LK.preview(id)}"></i><span>${esc(t.name)}</span></button>`).join('');
+  const ic = Object.entries(LK.ICONS).map(([id, c]) => `<button class="ic" data-icon="${id}" title="Use ${esc(c.name)} as the corner button"><i>${LK.icon(id) || '<img src="assets/bubble.png" alt="">'}</i>${esc(c.name)}</button>`).join('');
+  $('set').innerHTML = `<div class="grp"><h3>Color theme</h3><p>The colors of this window and of the corner button.</p><div class="themes">${th}</div></div>`
+    + `<div class="grp"><h3>Corner icon</h3><p>The round button that stays on top of your screen.</p><div class="icons">${ic}</div></div>`
+    + `<div class="grp"><h3>This app</h3><div class="row"><div class="grow"><b id="ver">0n3</b><small id="verNote">&nbsp;</small></div><button class="btn" id="chk" type="button">Check for updates</button></div></div>`;
+  $('set').querySelectorAll('.th').forEach((b) => (b.onclick = () => setLook({ theme: b.dataset.theme })));
+  $('set').querySelectorAll('.ic').forEach((b) => (b.onclick = () => setLook({ icon: b.dataset.icon })));
+  $('chk').onclick = async () => { if (!A) return; const b = $('chk'); b.disabled = true; $('verNote').textContent = 'Checking…'; try { sayVersion(await A.updateCheck()); } catch (e) { $('verNote').textContent = `Could not check for a new version: ${e.message}`; } b.disabled = false; };
+  markLook();
+  if (A) A.updateState().then(sayVersion).catch(() => {});
+}
+renderSet();
+if (KL) {
+  KL.on((l) => { look = LK.apply(l); markLook(); });
+  KL.get().then((l) => { if (l) { look = LK.apply(l); markLook(); } }).catch(() => {});
+}

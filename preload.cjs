@@ -15,6 +15,12 @@ contextBridge.exposeInMainWorld('on3desktop', {
   aiKeys: (keys) => ipcRenderer.invoke('ai:keys', keys && typeof keys === 'object' ? keys : {}),
 });
 contextBridge.exposeInMainWorld('on3bubble', { toggle: () => ipcRenderer.invoke('bubble:toggle') });
+// THE LOOK (app.html + bubble.html): the color theme and the corner icon. Main keeps the choice and tells both windows.
+contextBridge.exposeInMainWorld('on3look', {
+  get: () => ipcRenderer.invoke('look:get'),
+  set: (o) => ipcRenderer.invoke('look:set', { theme: String(o?.theme || ''), icon: String(o?.icon || '') }),
+  on: (cb) => { const h = (_e, o) => cb(o); ipcRenderer.on('look', h); return () => ipcRenderer.removeListener('look', h); },
+});
 
 // THE START SCREEN (splash.html): main reports each real start-up step.
 contextBridge.exposeInMainWorld('on3splash', { on: (cb) => { ipcRenderer.on('splash', (_e, o) => cb(o)); } });

@@ -377,6 +377,20 @@ ipcMain.handle('desk:connect', async (e, key, o) => { if (!fromOurPage(e)) retur
 ipcMain.handle('bubble:toggle', (e) => { if (fromOurPage(e)) togglePanel(); });
 ipcMain.handle('panel:hide', (e) => { if (fromOurPage(e)) togglePanel(false); });
 // the terminal's own calls: only from app.html in the panel
+// THE LOOK (0.9.0): which color theme and which corner icon. looks.js owns the lists; here only the choice is kept
+// (~/.0n/desk/look.json) and handed to the two windows. Only the app's own Settings may change it.
+const LOOK_FILE = process.env.ON3_LOOK_FILE || join(HOME, '.0n', 'desk', 'look.json');
+const lookId = (s, d) => (typeof s === 'string' && /^[a-z0-9-]{1,24}$/.test(s) ? s : d);
+const cleanLook = (o) => ({ theme: lookId(o?.theme, 'green'), icon: lookId(o?.icon, 'grid') });
+let look = (() => { try { return cleanLook(JSON.parse(readFileSync(LOOK_FILE, 'utf8'))); } catch { return cleanLook(null); } })();
+ipcMain.handle('look:get', (e) => (fromApp(e) || e.sender === bubble?.webContents ? look : null));
+ipcMain.handle('look:set', (e, o) => {
+  if (!fromApp(e)) return null;
+  look = cleanLook(o);
+  try { mkdirSync(dirname(LOOK_FILE), { recursive: true }); writeFileSync(LOOK_FILE, JSON.stringify(look)); } catch (err) { log(`look not saved: ${err.message}`); return null; }
+  try { if (bubble && !bubble.isDestroyed()) bubble.webContents.send('look', look); } catch { /* closing */ }
+  return look;
+});
 ipcMain.handle('update:state', (e) => (fromApp(e) ? updView() : null));
 ipcMain.handle('update:check', (e) => (fromApp(e) ? checkForUpdate() : null));
 ipcMain.handle('update:install', (e) => (fromApp(e) ? installUpdate() : null));
@@ -447,6 +461,31 @@ app.whenReady().then(async () => {
   makeBubble();
   // first run: open the chat so the person signs in and this computer becomes their desk
   if (agentState === 'not signed in') setTimeout(() => togglePanel(true), 800);
+  // ON3_LOOK_SHOT=<dir>: prove the look — the terminal with a sample conversation, Settings, then every theme and the
+  // corner button with every icon. Run with ON3_LOOK_FILE=<tmp file> and ON3_NO_AGENT=1 so nothing of the person's changes.
+  if (process.env.ON3_LOOK_SHOT) setTimeout(async () => {
+    const dir = process.env.ON3_LOOK_SHOT; mkdirSync(dir, { recursive: true });
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms)); const js = (c) => panel.webContents.executeJavaScript(c);
+    const cap = async (w, name) => writeFileSync(join(dir, `${name}.png`), (await w.webContents.capturePage()).toPNG());
+    try {
+      togglePanel(true); await wait(2500);
+      const lists = await js('({ themes: Object.keys(LOOKS.THEMES), icons: Object.keys(LOOKS.ICONS) })');
+      await cap(panel, '1-open');
+      await js(`bubble('Check my websites and tell me what is broken', 'me'); newCard(); ensureText().innerHTML = inl(esc('All **4 sites** answer. One thing to fix: \`0ncore.com/pricing\` loads in 4.1 s.')); (() => { const s = document.createElement('div'); s.className = 'step ok'; s.textContent = 'check 4 websites'; card.appendChild(s); const m = document.createElement('div'); m.className = 'meta'; m.textContent = 'done · 6.2s'; card.appendChild(m); })(); bubble('$ ls', 'me cmd'); newCard(); out = document.createElement('pre'); out.className = 'out'; out.textContent = 'notes.txt  photos  site'; card.appendChild(out); 1`);
+      await wait(300); await cap(panel, '2-conversation');
+      await js("document.querySelector('[data-p=cmds]').click(); 1"); await wait(300); await cap(panel, '3-commands');
+      await js("document.querySelector('[data-p=set]').click(); 1"); await wait(400); await cap(panel, '4-settings');
+      for (const [i, t] of lists.themes.entries()) {
+        await js(`document.querySelector('[data-p=set]').click(); document.querySelector('[data-theme=${t}]').click(); document.querySelector('[data-icon=${lists.icons[(i + 1) % lists.icons.length]}]').click(); 1`); await wait(450);
+        await cap(bubble, `bubble-${t}`);
+        if (i === 1) await cap(panel, `settings-${t}`);
+        await js("document.querySelector('[data-p=term]').click(); 1"); await wait(300); await cap(panel, `theme-${t}`);
+      }
+      const seen = await js("({ saved: localStorage.getItem('0n3.look'), neon: getComputedStyle(document.documentElement).getPropertyValue('--neon') })");
+      writeFileSync(join(dir, 'look.json'), JSON.stringify({ lists, look, file: readFileSync(LOOK_FILE, 'utf8'), seen, bubbleIcon: await bubble.webContents.executeJavaScript("document.getElementById('btn').dataset.icon") }, null, 2));
+    } catch (e) { writeFileSync(join(dir, 'error.txt'), String(e.stack || e)); }
+    app.quit();
+  }, 1500);
   // ON3_TERM_SHOT=<dir>: prove the terminal — open it, say one thing, run one command, capture each, quit.
   if (process.env.ON3_TERM_SHOT) setTimeout(async () => {
     const dir = process.env.ON3_TERM_SHOT; mkdirSync(dir, { recursive: true });
