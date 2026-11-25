@@ -19,7 +19,8 @@ import { existsSync, mkdirSync, writeFileSync, chmodSync, appendFileSync, unlink
 import { join, dirname, basename, extname, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import os from 'node:os';
-import { TermSession, WORKSPACE } from './term-session.mjs';
+import { TermSession, WORKSPACE, setAiContext } from './term-session.mjs';
+import * as ai from './ai-setup.mjs';
 import * as updater from './updater.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -35,6 +36,9 @@ const WIN = process.platform === 'win32';
 const SHIM = WIN ? join(HOME, '.0n', 'bin', '0n3.cmd') : join(HOME, '.0n', 'bin', '0n3');
 const BUBBLE = 64; const PANEL = { w: 520, h: 720 };
 const APP = join(HERE, 'app.html');
+// The app's own installer for the AI programs (ai-setup.mjs): it fetches the official Node.js into ~/.0n/ai once and
+// installs with that, so a computer with no Node, no npm and no terminal knowledge still gets Claude Code, Codex and Gemini CLI.
+const AI = setAiContext(process.env.ON3_AI_CLEAN ? { extraDirs: [] } : {}); // ON3_AI_CLEAN: a proof run that sees only the PATH and the app's own installs
 
 const log = (s) => { try { mkdirSync(dirname(LOG), { recursive: true }); appendFileSync(LOG, `${new Date().toISOString()} ${s}\n`); } catch { /* */ } };
 let deskMod = null;
@@ -52,6 +56,7 @@ function writeShim() {
 // ── the desk agent, as a child of this app ───────────────────────────────────
 let agent = null; let agentState = 'stopped'; let restartT = 0; let backoff = 5_000;
 async function startAgent() {
+  if (process.env.ON3_NO_AGENT) { agentState = 'stopped'; return; } // proof runs on a machine whose desk is already working: never a second helper
   const { loadConfig } = await deskAgent();
   if (!loadConfig()?.token) { agentState = 'not signed in'; refreshTray(); return; }
   if (agent) return;
@@ -85,6 +90,7 @@ async function login(token) {
   await client(cfg).call('/api/desk/hello', { method: 'POST', body: JSON.stringify({ machine: cfg.machine, agent: cfg.agent, version: `desktop-${app.getVersion()}` }) }).catch(() => {});
   log(`signed in as ${me.account?.email || me.email || '?'} machine ${cfg.machine}`);
   await startAgent();
+  setTimeout(() => provision('sign-in'), 500);
   return status();
 }
 async function signOut() {
@@ -183,6 +189,7 @@ function startLoopback() {
       if (acct.signedIn && !acct.same) return send(res, 403, { error: 'This computer is signed in to 0n3 as a different person.' });
       if (!acct.signedIn) return send(res, 409, { error: 'This computer is not signed in yet.', loggedIn: false });
       if (url.pathname === '/detect' && req.method === 'GET') return send(res, 200, await detect());
+      if (url.pathname === '/ai-keys' && req.method === 'POST') { takeKeys(b.keys, '0n3.app'); provT = 0; setTimeout(() => provision('keys'), 300); return send(res, 200, { ok: true }); }
       if (url.pathname === '/connect' && req.method === 'POST') { try { return send(res, 200, await connect(String(b.key || ''), { token: b.token, mcp: b.mcp })); } catch (e) { return send(res, 200, { ok: false, error: e.message }); } }
       return send(res, 404, { error: 'No such door.' });
     } catch (e) { log(`loopback ${req.url}: ${e.message}`); return send(res, 500, { error: e.message }); }
@@ -196,10 +203,48 @@ function startLoopback() {
 let bubble = null; let panel = null; let tray = null;
 // THE TERMINAL (2026-11-24): the panel opens on app.html — this app's own terminal, one live Claude session (term-session.mjs).
 // The 0n3.app chat (jobs, the phone, alerts) is one tab away; the panel loads it and comes back with on3desktop.terminal().
-const term = new TermSession((o) => { if (panel && !panel.isDestroyed() && isAppUrl(panel.webContents.getURL())) panel.webContents.send('term:event', o); });
+const sendTerm = (o) => { if (panel && !panel.isDestroyed() && isAppUrl(panel.webContents.getURL())) panel.webContents.send('term:event', o); };
+const term = new TermSession(sendTerm);
 const isAppUrl = (u) => { try { return new URL(u).protocol === 'file:' && decodeURIComponent(new URL(u).pathname).endsWith('/app.html'); } catch { return false; } };
 const fromApp = (e) => e.sender === panel?.webContents && isAppUrl(e.senderFrame?.url || e.sender.getURL());
 const fromOurPage = (e) => { try { return new URL(e.senderFrame?.url || e.sender.getURL()).origin === new URL(ON3).origin || e.sender === bubble?.webContents || fromApp(e); } catch { return false; } };
+
+// ── YOUR AIs, SET UP FOR YOU (0.8.0, Mike 2026-11-25) ─────────────────────────────────────────────────────────────────
+// "It also needs to install those CLI connections automatically with a login whenever Gemini, GPT or Claude is connected."
+// At start, after sign-in and each time the window is opened (at most every 5 minutes): ask 0n3 which of the three the
+// person connected, install the matching program if it is not on this computer, and sign it in with the connected key.
+// A browser sign-in is never opened by the app on its own: that waits for the person to click the AI's name.
+const on3Get = async (path) => { const { loadConfig } = await deskAgent(); const cfg = loadConfig(); if (!cfg?.token) return { status: 0, body: null }; const r = await fetch(`${ON3}${path}`, { headers: { Authorization: `Bearer ${cfg.token}` }, signal: AbortSignal.timeout(20_000) }); return { status: r.status, body: await r.json().catch(() => null) }; };
+let provT = 0; let provBusy = false; let provAgain = false; let keysAsked = 0;
+function takeKeys(keys, from) { const next = ai.saveKeys(AI, keys || {}); log(`ai keys from ${from}: ${Object.entries(next).filter(([, v]) => v).map(([k]) => k).join(', ') || 'none'}`); return next; }
+/** The keys can only be read by the person's own sign-in. A helper key made before 0.8.0 cannot: the signed-in 0n3 page hands them over instead. */
+function askPageForKeys() {
+  if (Date.now() - keysAsked < 10 * 60_000) return; keysAsked = Date.now();
+  const w = new BrowserWindow({ show: false, width: 420, height: 600, webPreferences: { preload: PRELOAD, contextIsolation: true, sandbox: true, nodeIntegration: false } });
+  w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  w.loadURL(`${ON3}/chat?keys=1`).catch(() => {});
+  setTimeout(() => { if (!w.isDestroyed()) w.destroy(); }, 40_000);
+}
+async function provision(why = 'start') {
+  if (provBusy) { if (why !== 'open') provAgain = true; return; }
+  if (why === 'open' && Date.now() - provT < 5 * 60_000) return;
+  provBusy = true; provT = Date.now();
+  try {
+    const k = await on3Get('/api/vault/ai-keys').catch(() => ({ status: 0 }));
+    if (k.status === 0 && !k.body) { const { loadConfig } = await deskAgent(); if (!loadConfig()?.token) return; }
+    if (k.status === 200 && k.body?.keys) takeKeys(k.body.keys, 'the helper key'); else if (k.status === 403) askPageForKeys();
+    const r = await on3Get('/api/ai/router').catch(() => ({ status: 0 }));
+    const connected = (r.body?.providers || []).filter((p) => p.connected && p.enabled !== false).map((p) => p.service || p.key);
+    const wanted = [...new Set(connected.map((p) => ai.PROVIDER_TO_AI[p]).filter(Boolean))];
+    log(`provision (${why}): connected on 0n3 = ${wanted.join(', ') || 'none of the three'} · here = ${Object.entries(ai.installed(AI)).filter(([, v]) => v).map(([n]) => n).join(', ') || 'none'}`);
+    for (const key of wanted) { const res = await term.setup(key, { quiet: true }).catch((e) => ({ ok: false, error: e.message })); if (!res.ok && !res.needsBrowser) log(`provision ${key}: ${res.error}`); }
+    await ai.writeLaunchMap(AI).catch((e) => log(`launch map: ${e.message}`));
+    // Who you are talking to changes by itself ONLY when the current one cannot answer here (the Bot, or an AI that is gone).
+    const here = ai.installed(AI);
+    if (!term.picked && term.idle && (term.engine === 'bot' || !here[term.engine])) { const { loadConfig } = await deskAgent(); term.setEngine(ai.pickEngine({ deskAgent: loadConfig()?.agent, have: here, connected }), false); }
+    sendTerm({ t: 'info', info: term.info() });
+  } catch (e) { log(`provision: ${e.message}`); } finally { provBusy = false; if (provAgain) { provAgain = false; setTimeout(() => provision('again'), 500); } }
+}
 
 // ── THE START SCREEN (0.7.0) ──────────────────────────────────────────────────────────────────────────────────────────
 // Mike: "I want this application to go through an installation process when called … something that at least shows the logo
@@ -279,7 +324,7 @@ function placePanel() {
 function togglePanel(force) {
   if (!panel) makePanel();
   const show = force !== undefined ? force : !panel.isVisible();
-  if (show) { placePanel(); panel.show(); panel.focus(); } else panel.hide();
+  if (show) { placePanel(); panel.show(); panel.focus(); provision('open'); } else panel.hide();
 }
 
 function refreshTray() {
@@ -339,6 +384,12 @@ ipcMain.handle('term:info', (e) => (fromApp(e) ? term.info() : null));
 ipcMain.handle('term:send', (e, text) => (fromApp(e) ? term.send(String(text || '').slice(0, 20000)) : false));
 ipcMain.handle('term:stop', (e) => (fromApp(e) ? term.stop() : false));
 ipcMain.handle('term:engine', (e, name) => (fromApp(e) ? term.setEngine(String(name || '')) : null));
+// Click an AI's name: it is installed if missing, signed in if it is not, and becomes the one you talk to.
+ipcMain.handle('term:setup', async (e, name) => { if (!fromApp(e)) return null; const r = await term.setup(String(name || ''), { switchTo: true }).catch((err) => ({ ok: false, error: err.message })); return { ...r, info: term.info() }; }); // the Jobs helper is NOT restarted (that kills a job in flight): it reads launch.json on every turn
+// "Sign in to … with my account": the key connected on 0n3 steps aside and the AI's own browser sign-in opens.
+ipcMain.handle('term:signin', async (e, name) => { if (!fromApp(e)) return null; const r = await term.setup(String(name || ''), { switchTo: true, account: true }).catch((err) => ({ ok: false, error: err.message })); return { ...r, info: term.info() }; });
+// The person's own signed-in 0n3 page hands over the AI keys they connected (never an app or AI key: see /api/vault/ai-keys).
+ipcMain.handle('ai:keys', (e, keys) => { try { if (new URL(e.senderFrame?.url || e.sender.getURL()).origin !== new URL(ON3).origin) return false; } catch { return false; } takeKeys(keys, 'the 0n3 page'); provT = 0; setTimeout(() => provision('keys'), 300); return true; });
 ipcMain.handle('term:reset', (e) => (fromApp(e) ? term.reset() : false));
 ipcMain.handle('term:pick', async (e) => { if (!fromApp(e)) return null; const { dialog } = await import('electron'); const r = await dialog.showOpenDialog(panel, { properties: ['openDirectory', 'createDirectory'], defaultPath: term.cwd || WORKSPACE, title: 'The folder your terminal works in' }); return r.canceled || !r.filePaths[0] ? term.info() : term.setCwd(r.filePaths[0]); });
 // Dropped onto the terminal: say what each path is (folder, image or file) so the page can show it and the AI is told the kind.
@@ -382,7 +433,9 @@ app.whenReady().then(async () => {
   step(35, 'Looking for the AI programs on this computer…');
   try { await Promise.race([detect(), pause(6000)]); } catch (e) { log(`detect: ${e.message}`); }
   step(60, 'Starting your desk…');
+  try { await ai.writeLaunchMap(AI); } catch (e) { log(`launch map: ${e.message}`); } // the Jobs helper starts the same AIs the terminal does
   await startAgent();
+  setTimeout(() => provision('start'), 4000);
   step(82, 'Checking for a newer version…');
   await Promise.race([checkForUpdate(), pause(5000)]);
   setInterval(() => checkForUpdate().catch(() => {}), 6 * 60 * 60 * 1000); // and again every six hours while the app stays open
@@ -400,6 +453,20 @@ app.whenReady().then(async () => {
     try {
       togglePanel(true); await new Promise((r) => setTimeout(r, 2500));
       writeFileSync(join(dir, '1-open.png'), (await panel.webContents.capturePage()).toPNG());
+      // ON3_SHOT_SETUP=<ai>: prove click-to-install on a fresh profile — click the name, wait for the card, say one thing.
+      if (process.env.ON3_SHOT_SETUP) {
+        const k = process.env.ON3_SHOT_SETUP;
+        await panel.webContents.executeJavaScript(`document.querySelector('#eng [data-e=${k}]').click();true`); await new Promise((r) => setTimeout(r, 6000));
+        writeFileSync(join(dir, 's1-setting-up.png'), (await panel.webContents.capturePage()).toPNG());
+        for (let i = 0; i < 90 && term.info().setting.length; i++) await new Promise((r) => setTimeout(r, 2000));
+        await new Promise((r) => setTimeout(r, 1500));
+        writeFileSync(join(dir, 's2-ready.png'), (await panel.webContents.capturePage()).toPNG());
+        await panel.webContents.executeJavaScript("document.getElementById('in').value='Say hello in five words.';document.getElementById('f').requestSubmit();true");
+        await new Promise((r) => setTimeout(r, 25000));
+        writeFileSync(join(dir, 's3-answer.png'), (await panel.webContents.capturePage()).toPNG());
+        writeFileSync(join(dir, 'setup.json'), JSON.stringify({ info: term.info(), text: await panel.webContents.executeJavaScript("document.getElementById('log').innerText") }, null, 2));
+        app.quit(); return;
+      }
       await panel.webContents.executeJavaScript("document.getElementById('in').value='Use 0n3 to tell me which account I am signed in as, in one short sentence.';document.getElementById('f').requestSubmit();true");
       await new Promise((r) => setTimeout(r, 20000));
       writeFileSync(join(dir, '2-answer.png'), (await panel.webContents.capturePage()).toPNG());
@@ -408,6 +475,12 @@ app.whenReady().then(async () => {
       await panel.webContents.executeJavaScript("document.getElementById('in').value='$ echo terminal ok && sw_vers -productVersion';document.getElementById('f').requestSubmit();true");
       await new Promise((r) => setTimeout(r, 2500));
       writeFileSync(join(dir, '2b-followup.png'), (await panel.webContents.capturePage()).toPNG());
+      // 0.8.0: the 0n3 Bot (nothing installed), then "Which AIs do I have?"
+      await panel.webContents.executeJavaScript("document.querySelector('#eng [data-e=bot]').click();true"); await new Promise((r) => setTimeout(r, 1200));
+      await panel.webContents.executeJavaScript("document.getElementById('in').value='In one short sentence: which 0n3 account is this?';document.getElementById('f').requestSubmit();true");
+      await new Promise((r) => setTimeout(r, Number(process.env.ON3_BOT_WAIT || 25000)));
+      writeFileSync(join(dir, '2c-bot.png'), (await panel.webContents.capturePage()).toPNG());
+      writeFileSync(join(dir, 'info.json'), JSON.stringify({ info: term.info(), text: await panel.webContents.executeJavaScript("document.getElementById('log').innerText") }, null, 2));
       await panel.webContents.executeJavaScript("document.querySelector('.tab[data-p=cmds]').click();true"); await new Promise((r) => setTimeout(r, 800));
       writeFileSync(join(dir, '3-commands.png'), (await panel.webContents.capturePage()).toPNG());
     } catch (e) { writeFileSync(join(dir, 'error.txt'), String(e.stack || e)); }

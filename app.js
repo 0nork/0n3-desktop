@@ -14,16 +14,18 @@ const CMDS = [
     ['Open this folder', 'In Finder / Explorer', 'sh', MAC ? 'open .' : 'start .'],
     ['What is in this folder', 'A quick look', 'ai', 'Look at this folder and tell me in a few lines what is in it and what it is for.'],
     ['Free up space', 'Shows the plan first', 'ai', 'Find the biggest files and folders in my home folder that are safe to clean up. Show me a list with sizes. Do NOT delete anything.'],
-    ['Is my Mac healthy?', 'Disk, memory, battery', 'ai', 'Check this computer: free disk space, memory pressure, battery health and anything unusual running. Short report.'],
-    ['Install Claude Code', 'If it is missing', 'sh', 'npm install -g @anthropic-ai/claude-code && claude --version'],
+    ['Is my computer healthy?', 'Disk, memory, battery', 'ai', 'Check this computer: free disk space, memory pressure, battery health and anything unusual running. Short report.'],
   ]],
+  // 'setup' = the app installs that AI if it is missing and signs it in. Nothing to type, no other window to use.
   ['Your AIs', [
-    ['Install Codex', 'OpenAI\'s coding agent', 'sh', 'npm install -g @openai/codex && codex --version'],
-    ['Sign in to Codex', 'Opens your browser', 'sh', 'codex login'],
-    ['Install Gemini CLI', 'Google\'s agent', 'sh', 'npm install -g @google/gemini-cli && gemini --version'],
-    ['Sign in to Gemini', 'Opens Gemini in Terminal', 'sh', MAC ? 'osascript -e \'tell application "Terminal" to do script "gemini"\' -e \'tell application "Terminal" to activate\'' : 'start cmd /k gemini'],
-    ['Sign in to Claude', 'Opens Claude in Terminal', 'sh', MAC ? 'osascript -e \'tell application "Terminal" to do script "claude"\' -e \'tell application "Terminal" to activate\'' : 'start cmd /k claude'],
-    ['Which AIs do I have?', 'Versions on this computer', 'sh', 'for b in claude codex gemini; do printf "%-8s" $b; ($b --version 2>/dev/null | head -1) || echo "not installed"; done'],
+    ['Set up Claude', 'Installs it and signs you in', 'setup', 'claude'],
+    ['Set up ChatGPT', 'Installs Codex and signs you in', 'setup', 'codex'],
+    ['Set up Gemini', 'Installs it and signs you in', 'setup', 'gemini'],
+    ['Use the 0n3 Bot', 'Needs nothing installed', 'setup', 'bot'],
+    ['Sign in to Claude with my account', 'Your Claude plan, in the browser', 'signin', 'claude'],
+    ['Sign in to ChatGPT with my account', 'Your ChatGPT plan, in the browser', 'signin', 'codex'],
+    ['Sign in to Gemini with my account', 'Your Google account, in the browser', 'signin', 'gemini'],
+    ['Which AIs do I have?', 'On this computer', 'ais', ''],
   ]],
   ['Your business (0n3 apps)', [
     ['Today\'s briefing', 'Leads, payments, calendar', 'ai', 'Use 0n3 to give me a short briefing for today from my connected apps: new CRM leads, payments, calendar and anything that needs me. Most important first.'],
@@ -49,7 +51,7 @@ function renderCmds() {
   const groups = [...CMDS, ...(mine().length ? [['Yours', mine().map((m) => [m.name, m.kind === 'sh' ? m.text : 'Plain English', m.kind, m.text, true])]] : [])];
   $('cmds').innerHTML = groups.map(([g, list]) => `<div class="grp"><h3>${esc(g)}</h3><div class="grid">${list.map(([n, s, k, q, own]) => `<button class="cmd${own ? ' mine' : ''}" data-k="${k}" data-q="${esc(q)}" title="${esc(q)}"><b>${esc(n)}</b><small>${esc(s)}</small></button>`).join('')}</div></div>`).join('')
     + `<div class="grp"><h3>Add your own</h3><div class="add"><input id="cn" placeholder="Name, e.g. Morning check"><input id="cq" placeholder="What it should do, or $ a command" style="flex:3"><button id="ca">Add</button></div></div>`;
-  document.querySelectorAll('.cmd').forEach((b) => (b.onclick = () => { show('term'); run(b.dataset.k === 'sh' ? `$ ${b.dataset.q}` : b.dataset.q); }));
+  document.querySelectorAll('.cmd').forEach((b) => (b.onclick = () => { show('term'); const k = b.dataset.k; if (k === 'setup') return pickEngine(b.dataset.q); if (k === 'signin') return T.signin(b.dataset.q).then((r) => r?.info && paintInfo(r.info)); if (k === 'ais') return whichAis(); run(k === 'sh' ? `$ ${b.dataset.q}` : b.dataset.q); }));
   $('ca').onclick = () => { const n = $('cn').value.trim(); const q = $('cq').value.trim(); if (!n || !q) return; const list = mine(); list.push({ name: n, kind: q.startsWith('$') ? 'sh' : 'ai', text: q.replace(/^\$\s*/, '') }); localStorage.setItem(MINE_KEY, JSON.stringify(list)); renderCmds(); renderQuick(); };
 }
 function renderQuick() {
@@ -60,6 +62,7 @@ function renderQuick() {
 }
 
 // ── the transcript ────────────────────────────────────────────────────────────────────────────────────────────────────
+const setups = {};
 const log = $('log'); let card = null; let tx = null; let raw = ''; let out = null; let homeDir = ''; const steps = {}; const hist = []; let hi = -1;
 const atBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 80;
 const down = (force) => { if (force || atBottom()) log.scrollTop = log.scrollHeight; };
@@ -78,10 +81,16 @@ T.onEvent((o) => {
   else if (o.t === 'result') { const s = steps[o.id]; if (s) { s.classList.add(o.error ? 'bad' : 'ok'); if (o.error && o.s) s.title = o.s; } }
   else if (o.t === 'done') { if (card) { if (tx) tx.innerHTML = inl(esc(raw)); card.querySelectorAll('.cursor').forEach((c) => c.remove()); const m = document.createElement('div'); m.className = 'meta'; m.textContent = `${o.stopped ? 'stopped' : 'done'} · ${(o.ms / 1000).toFixed(1)}s`; card.appendChild(m); if (o.error) { const e = document.createElement('div'); e.className = 'err'; e.textContent = o.error; card.appendChild(e); } } card = null; busy(false); }
   else if (o.t === 'shell') { bubble(`$ ${o.s}`, 'me cmd'); newCard(); out = document.createElement('pre'); out.className = 'out'; card.appendChild(out); busy(true); }
+  else if (o.t === 'out' && o.k) { const u = setups[o.k]; if (u) { u.p.textContent += o.s; u.p.scrollTop = u.p.scrollHeight; } }
   else if (o.t === 'out') { if (!out) { newCard(); out = document.createElement('pre'); out.className = 'out'; card.appendChild(out); } out.textContent += o.s; out.scrollTop = out.scrollHeight; }
   else if (o.t === 'shelldone') { if (card) { const m = document.createElement('div'); m.className = 'meta'; m.textContent = `exit ${o.code} · ${(o.ms / 1000).toFixed(1)}s`; card.appendChild(m); if (out && !out.textContent) out.textContent = '(no output)'; } card = null; out = null; busy(false); }
   else if (o.t === 'error') { if (!card) newCard(); const e = document.createElement('div'); e.className = 'err'; e.textContent = o.s; card.appendChild(e); }
-  else if (o.t === 'engine') { /* the picker already shows it */ }
+  else if (o.t === 'engine') { T.info().then(paintInfo); }
+  else if (o.t === 'info') { paintInfo(o.info); }
+  // An AI being set up by the app: its OWN card per AI (two can be in line), plain lines, a clear last line. An answer that
+  // is still streaming keeps its card.
+  else if (o.t === 'setup') { clearEmpty(); const c = document.createElement('div'); c.className = 'ai'; log.appendChild(c); const h = document.createElement('div'); h.className = 'step'; h.textContent = `${o.s}…`; c.appendChild(h); const p = document.createElement('pre'); p.className = 'out'; c.appendChild(p); setups[o.k] = { c, p }; if ($('stop').disabled) $('dot').className = 'dot busy'; }
+  else if (o.t === 'setupdone') { const u = setups[o.k]; delete setups[o.k]; if (u) { u.c.querySelector('.step')?.classList.add(o.ok ? 'ok' : 'bad'); if (!u.p.textContent) u.p.remove(); const m = document.createElement('div'); m.className = o.ok ? 'tx' : 'err'; m.textContent = o.s; u.c.appendChild(m); } else bubble(o.s, o.ok ? 'ai' : 'err'); if ($('stop').disabled && !Object.keys(setups).length) $('dot').className = 'dot on'; }
   else if (o.t === 'ready') { $('st').textContent = `live · ${o.model || 'Claude'}${o.tools ? ` · ${o.tools} tools` : ''}${(o.mcp || []).some((m) => /^0n3:connected/.test(m)) ? ' · 0n3 connected' : ''}`; $('dot').className = 'dot on'; }
   else if (o.t === 'cwd') { $('cwd').textContent = home(o.cwd, homeDir); }
   else if (o.t === 'reset') { log.innerHTML = '<div class="empty" id="empty"><b>New conversation.</b><br>Ask anything.</div>'; card = null; busy(false); }
@@ -164,19 +173,41 @@ function show(p) {
 }
 document.querySelectorAll('.tab').forEach((t) => (t.onclick = () => show(t.dataset.p)));
 
-const ENG = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini' };
-function renderEng(i) {
-  $('eng').innerHTML = Object.keys(ENG).map((k) => `<button data-e="${k}" class="${i.engine === k ? 'on' : ''} ${i.installed?.[k] ? '' : 'off'}" title="${i.installed?.[k] ? `Talk to ${ENG[k]}` : `${ENG[k]} is not installed: see Commands → Your AIs`}">${ENG[k]}</button>`).join('');
-  $('eng').querySelectorAll('button').forEach((b) => (b.onclick = async () => { const k = b.dataset.e; if (!i.installed?.[k]) { show('cmds'); return; } try { localStorage.setItem('0n3.engine', k); } catch (e) { /* */ } const n = await T.setEngine(k); renderEng(n); $('st').textContent = `${ENG[k]} · ready`; }));
+// ── WHICH AI ANSWERS ──────────────────────────────────────────────────────────────────────────────────────────────────
+// 0.8.0 (Mike 2026-11-25): every name is a button that WORKS. An AI that is not on this computer is installed and signed in
+// by the app when its name is clicked; the 0n3 Bot needs nothing installed, so the terminal answers from the first minute.
+const ENG = { claude: 'Claude', codex: 'ChatGPT', gemini: 'Gemini', bot: '0n3 Bot' };
+let lastInfo = null;
+function statusLine(i) {
+  if ((i.setting || []).length) return `Setting up ${i.setting.map((k) => ENG[k]).join(', ')}…`;
+  if (!i.signedIn) return 'Sign in to 0n3: open Jobs & phone';
+  if (i.engine === 'bot') return 'Ready · 0n3 Bot (click an AI above to work on this computer)';
+  return i.installed?.[i.engine] ? `Ready · ${ENG[i.engine]}` : `${ENG[i.engine]}: click its name to set it up`;
+}
+function paintInfo(i) {
+  if (!i) return; lastInfo = i;
+  $('eng').innerHTML = Object.keys(ENG).map((k) => { const here = !!i.installed?.[k]; const busyNow = (i.setting || []).includes(k); return `<button data-e="${k}" class="${i.engine === k ? 'on' : ''} ${here ? '' : 'off'}" ${busyNow ? 'disabled' : ''} title="${k === 'bot' ? 'Answers from 0n3 with the AI you connected there. Needs nothing installed; cannot open files on this computer.' : here ? `Talk to ${ENG[k]}` : `Click to set ${ENG[k]} up on this computer: 0n3 installs it and signs you in`}">${busyNow ? `${ENG[k]}…` : ENG[k]}</button>`; }).join('');
+  $('eng').querySelectorAll('button').forEach((b) => (b.onclick = () => pickEngine(b.dataset.e)));
+  if ($('stop').disabled) { $('st').textContent = statusLine(i); $('dot').className = `dot ${(i.setting || []).length ? 'busy' : 'on'}`; }
+}
+async function pickEngine(k) {
+  if (!ENG[k]) return;
+  try { localStorage.setItem('0n3.engine', k); } catch (e) { /* */ }
+  if (k === 'bot') { paintInfo(await T.setEngine('bot')); return; }
+  // installed and signed in: this returns at once and switches. Otherwise it installs and signs in, shown as a card.
+  const r = await T.setup(k);
+  if (r?.info) paintInfo(r.info);
+}
+async function whichAis() {
+  const i = await T.info(); paintInfo(i);
+  bubble(['claude', 'codex', 'gemini'].map((k) => `${ENG[k]}: ${i.installed?.[k] ? 'on this computer' : 'not set up yet (click its name above)'}`).join('\n') + `\n0n3 Bot: always available${i.signedIn ? '' : ' once you sign in'}`, 'ai');
 }
 (async () => {
   let i = await T.info(); homeDir = i.home || '';
   const savedEng = (() => { try { return localStorage.getItem('0n3.engine'); } catch (e) { return null; } })();
   if (savedEng && savedEng !== i.engine && i.installed?.[savedEng]) i = await T.setEngine(savedEng);
-  renderEng(i);
+  paintInfo(i);
   $('cwd').textContent = home(i.cwd, homeDir);
-  $('st').textContent = !i.installed?.[i.engine] ? `${ENG[i.engine]} is not installed: see Commands` : !i.signedIn ? 'Ready (sign in to 0n3 to use your apps)' : 'Ready';
-  $('dot').className = `dot ${i.installed?.[i.engine] ? 'on' : ''}`;
   renderCmds(); renderQuick(); $('in').focus();
 })();
 

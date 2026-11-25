@@ -19,19 +19,20 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
-import { GeminiEngine, CodexEngine, findBin } from './engines.mjs';
+import { GeminiEngine, CodexEngine, BotEngine, ownAccountHint } from './engines.mjs';
+import * as ai from './ai-setup.mjs';
 
 const HOME = os.homedir();
 const WIN = process.platform === 'win32';
 export const WORKSPACE = join(HOME, '.0n', 'desk', 'workspace');
 const MCP_FILE = join(HOME, '.0n', 'desk', 'terminal-mcp.json');
-const EXTRA_PATH = [join(HOME, '.0n', 'bin'), join(HOME, '.local', 'bin'), join(HOME, '.claude', 'local'), join(HOME, '.npm-global', 'bin'), join(HOME, '.0n', 'ai', 'node_modules', '.bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'];
-const env = () => ({ ...process.env, PATH: [...EXTRA_PATH, process.env.PATH || ''].join(WIN ? ';' : ':'), ON3_TERMINAL: '1' });
-
-export function findClaude() {
-  for (const d of EXTRA_PATH) { const p = join(d, WIN ? 'claude.cmd' : 'claude'); if (existsSync(p)) return p; }
-  return null;
-}
+// Where each AI is and how it starts: ai-setup.mjs (2026-11-25). `aiCtx` is set by the app with its own runtime + npm.
+let aiCtx = ai.context();
+export const setAiContext = (o) => { aiCtx = ai.context(o); return aiCtx; };
+export const getAiContext = () => aiCtx;
+const env = (extra = {}) => ai.envFor(aiCtx, null, extra);
+export const findClaude = () => ai.resolve('claude', aiCtx);
+const NAMES = { claude: 'Claude', codex: 'ChatGPT', gemini: 'Gemini', bot: '0n3 Bot' };
 function desk() { try { return JSON.parse(readFileSync(join(HOME, '.0n', 'desk.json'), 'utf8')); } catch { return {}; } }
 function mcpFile() {
   const c = desk(); if (!c.token) return null;
@@ -56,28 +57,65 @@ export class TermSession {
   constructor(emit) {
     this.emit = emit; this.p = null; this.cwd = WORKSPACE; this.started = false; this.busy = false; this.buf = ''; this.t0 = 0; this.blocks = {}; this.sh = null;
     // which AI answers: claude (this class), gemini or codex (engines.mjs). Default = the desk's chosen AI, else the first installed.
-    this.alt = { gemini: new GeminiEngine(emit), codex: new CodexEngine(emit) };
-    const want = ({ claude_code: 'claude', gemini_cli: 'gemini', codex: 'codex' })[desk().agent] || 'claude';
-    const have = this.installed();
-    this.engine = have[want] ? want : (['claude', 'codex', 'gemini'].find((k) => have[k]) || 'claude');
+    this.alt = { gemini: new GeminiEngine(emit), codex: new CodexEngine(emit), bot: new BotEngine(emit) };
+    this.picked = false; this.setting = {}; this.claudeEnv = null;
+    // Which AI answers: whichever is really on this computer; none yet = the 0n3 Bot, which needs nothing installed.
+    this.engine = ai.pickEngine({ deskAgent: desk().agent, have: this.installed() });
   }
-  installed() { return { claude: !!findClaude(), codex: !!findBin('codex'), gemini: !!findBin('gemini') }; }
-  setEngine(name) {
-    if (!['claude', 'gemini', 'codex'].includes(name) || name === this.engine) return this.info();
+  installed() { return ai.installed(aiCtx); }
+  /** `byPerson`: they clicked it. The app's own automatic switches never override a person's pick. */
+  setEngine(name, byPerson = true) {
+    if (!['claude', 'gemini', 'codex', 'bot'].includes(name)) return this.info();
+    if (byPerson) this.picked = true;
+    if (name === this.engine) return this.info();
     this.stop(); this.kill(); for (const e of Object.values(this.alt)) e.kill();
-    this.engine = name; this.started = false; this.emit({ t: 'engine', engine: name }); return this.info();
+    this.engine = name; this.started = false; this.claudeEnv = null; this.emit({ t: 'engine', engine: name });
+    if (name !== 'bot' && ai.AIS[name]) this.rememberAgent(name);
+    return this.info();
   }
-  info() { const have = this.installed(); return { claude: have.claude, installed: have, engine: this.engine, cwd: this.cwd, busy: this.busy || !!this.sh || Object.values(this.alt).some((e) => e.busy), live: !!this.p, signedIn: !!desk().token, home: HOME }; }
+  /** The Jobs helper works with the same AI the person talks to here. */
+  rememberAgent(name) { try { const c = desk(); if (c.token && c.agent !== ai.AIS[name].agent) writeFileSync(join(HOME, '.0n', 'desk.json'), JSON.stringify({ ...c, agent: ai.AIS[name].agent }, null, 2), { mode: 0o600 }); } catch { /* */ } }
+  info() { const have = this.installed(); return { claude: have.claude, installed: { ...have, bot: true }, engine: this.engine, picked: this.picked, setting: Object.keys(this.setting), cwd: this.cwd, busy: this.busy || !!this.sh || Object.values(this.alt).some((e) => e.busy), live: !!this.p, signedIn: !!desk().token, home: HOME, platform: process.platform }; }
+  get idle() { return !this.busy && !this.sh && !Object.values(this.alt).some((e) => e.busy); }
+
+  /**
+   * SET ONE AI UP, start to finish, with nobody opening a terminal: install it if it is missing, sign it in (the key
+   * connected on 0n3 when there is one, else its own browser sign-in), tell the Jobs helper. Shown as one card.
+   * `quiet`: started by the app itself (start-up, a newly connected AI) — never opens a browser, and stays silent when
+   * there was nothing to do.
+   */
+  async setup(name, { quiet = false, switchTo = !quiet, account = false } = {}) {
+    const a = ai.AIS[name]; if (!a) return { ok: false, error: 'Unknown AI.' };
+    if (this.setting[name]) return this.setting[name];
+    const job = (async () => {
+      const was = !!ai.resolve(name, aiCtx);
+      const pre = was ? await ai.authStatus(name, aiCtx).catch(() => ({ signedIn: false })) : { signedIn: false };
+      if (was && pre.signedIn && !account) { await ai.writeLaunchMap(aiCtx).catch(() => {}); if (switchTo) this.setEngine(name, !quiet); return { ok: true, key: name, installed: true, signedIn: true, already: true }; }
+      if (quiet && was && !ai.keyFor(aiCtx, name)) return { ok: false, key: name, installed: true, signedIn: false, needsBrowser: true }; // a browser sign-in is the person's move
+      this.emit({ t: 'setup', k: name, s: was ? `Signing in to ${a.name}` : `Setting up ${a.name} on this computer (about a minute)` });
+      if (account && this.engine === name) { this.kill(); for (const e of Object.values(this.alt)) e.kill(); this.started = false; }
+      const r = await ai.setup(name, aiCtx, { onLine: (l) => this.emit({ t: 'out', k: name, s: `${l}\n` }), browser: !quiet, account });
+      this.claudeEnv = null;
+      // Set up by the app on its own (quiet): it never changes who you are talking to — the app picks once, after all of them.
+      if (r.ok) { this.emit({ t: 'setupdone', k: name, ok: true, s: `${a.name} is ready.${switchTo ? ` You are talking to ${a.name} now.` : ''}` }); if (switchTo) this.setEngine(name, !quiet); }
+      else if (r.needsBrowser) this.emit({ t: 'setupdone', k: name, ok: true, s: `${a.name} is installed. Click ${a.name} above to sign in.` });
+      else this.emit({ t: 'setupdone', k: name, ok: false, s: r.error || `${a.name} could not be set up.` });
+      this.emit({ t: 'info', info: this.info() });
+      return r;
+    })().finally(() => { delete this.setting[name]; });
+    this.setting[name] = job;
+    return job;
+  }
   setCwd(dir) { if (!dir || !existsSync(dir)) return this.info(); if (dir !== this.cwd) { this.kill(); for (const e of Object.values(this.alt)) e.kill(); this.started = false; this.cwd = dir; this.emit({ t: 'cwd', cwd: dir }); } return this.info(); }
 
   start() {
     if (this.p) return true;
-    const bin = findClaude();
-    if (!bin) { this.emit({ t: 'error', s: 'Claude Code is not on this computer yet. Click "Install Claude Code" in Commands, or run: npm install -g @anthropic-ai/claude-code' }); return false; }
+    const l = findClaude();
+    if (!l) { this.emit({ t: 'error', s: 'Claude is not set up on this computer yet. Click Claude above and 0n3 sets it up for you.' }); return false; }
     mkdirSync(this.cwd, { recursive: true });
     const mcp = mcpFile();
     const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-mode', 'bypassPermissions', ...(mcp ? ['--mcp-config', mcp, '--strict-mcp-config'] : []), ...(this.started ? ['--continue'] : [])];
-    this.p = spawn(bin, args, { cwd: this.cwd, env: env(), stdio: ['pipe', 'pipe', 'pipe'] });
+    this.p = spawn(l.cmd, [...l.pre, ...args], { cwd: this.cwd, env: ai.envFor(aiCtx, l, this.claudeEnv || {}), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     this.started = true; this.buf = '';
     this.p.stdout.on('data', (d) => { this.buf += d; let i; while ((i = this.buf.indexOf('\n')) >= 0) { const l = this.buf.slice(0, i); this.buf = this.buf.slice(i + 1); if (l.trim()) this.line(l); } });
     this.p.stderr.on('data', (d) => { const s = String(d); if (!/no stdin data|Warning:/i.test(s)) this.emit({ t: 'error', s: short(s, 400) }); });
@@ -97,12 +135,21 @@ export class TermSession {
     }
     if (j.type === 'assistant') { for (const c of j.message?.content || []) if (c.type === 'tool_use' && !HIDDEN.has(c.name)) this.emit({ t: 'step', id: c.id, s: stepLabel(c.name, c.input) }); return; }
     if (j.type === 'user') { for (const c of j.message?.content || []) if (c.type === 'tool_result') this.emit({ t: 'result', id: c.tool_use_id, error: !!c.is_error, s: short(Array.isArray(c.content) ? c.content.map((x) => x.text || '').join(' ') : c.content, 220) }); return; }
-    if (j.type === 'result') { this.busy = false; this.emit({ t: 'done', ms: Date.now() - this.t0, cost: j.total_cost_usd ?? null, error: j.is_error ? short(j.result, 300) : null }); }
+    if (j.type === 'result') {
+      this.busy = false; let error = j.is_error ? short(j.result, 300) : null;
+      // The Anthropic key connected on 0n3 was refused: stop using it (the next start has no key, and Claude's own sign-in takes over).
+      if (error && /invalid api key|fix external api key|credit balance is too low/i.test(error)) { const low = /credit balance/i.test(error); if (!low) { ai.refuseKey('claude', aiCtx).catch(() => {}); this.claudeEnv = {}; this.kill(); this.started = false; } error = low ? `Claude says the key connected on 0n3 has no credit left. ${ownAccountHint('claude')}` : `The Claude key connected on 0n3 was refused, so 0n3 stopped using it. ${ownAccountHint('claude')}`; }
+      this.emit({ t: 'done', ms: Date.now() - this.t0, cost: j.total_cost_usd ?? null, error });
+    }
   }
   send(text) {
     const msg = String(text || '').trim(); if (!msg) return false;
     if (msg.startsWith('$')) return this.shell(msg.replace(/^\$\s*/, ''));
+    // The chosen AI is not on this computer (a first run, or it was removed): set it up, then say the message.
+    if (this.engine !== 'bot' && !ai.resolve(this.engine, aiCtx)) { const k = this.engine; this.setup(k, { switchTo: true }).then((r) => { if (r.ok && this.engine === k) this.send(msg); }); return true; }
     if (this.engine !== 'claude') { mkdirSync(this.cwd, { recursive: true }); this.alt[this.engine].send(msg, this.cwd); return true; }
+    // Claude signed in with the key connected on 0n3 (only when it has no sign-in of its own): worked out once per session.
+    if (!this.p && this.claudeEnv === null) { this.claudeEnv = {}; ai.signedEnv('claude', aiCtx).then((e) => { this.claudeEnv = e || {}; }).catch(() => {}).finally(() => this.send(msg)); return true; }
     if (this.busy && msg === this.last && Date.now() - this.t0 < 3000) return false; // the same line twice in a blink: one turn
     if (this.busy) { this.emit({ t: 'error', s: 'Still working on the last one. Press Stop, or wait a moment.' }); return false; }
     this.last = msg;

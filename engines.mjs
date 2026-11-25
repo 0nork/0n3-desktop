@@ -14,23 +14,30 @@
  *   Measured: runs; Mike's ChatGPT sign-in has expired (401), which the app turns into "Sign in to Codex".
  */
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
+import { context, resolve, envFor, signedEnv, keyFor, refuseKey, authStatus } from './ai-setup.mjs';
 
-const HOME = os.homedir(); const WIN = process.platform === 'win32';
-const PATHS = [join(HOME, '.0n', 'bin'), join(HOME, '.local', 'bin'), join(HOME, '.npm-global', 'bin'), join(HOME, '.0n', 'ai', 'node_modules', '.bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'];
-export const env = (extra = {}) => ({ ...process.env, PATH: [...PATHS, process.env.PATH || ''].join(WIN ? ';' : ':'), ON3_TERMINAL: '1', ...extra });
-export const findBin = (name) => { for (const d of PATHS) { const p = join(d, WIN ? `${name}.cmd` : name); if (existsSync(p)) return p; } return null; };
+const HOME = os.homedir();
+// 2026-11-25: where an AI is and how it starts is ai-setup.mjs's answer (the PATH, the real Windows folders, the app's own
+// install; a .cmd is never spawned). This file used to look in a fixed list of macOS folders.
+const ctx = () => context();
+export const findBin = (name) => resolve(name, ctx());
 const desk = () => { try { return JSON.parse(readFileSync(join(HOME, '.0n', 'desk.json'), 'utf8')); } catch { return {}; } };
 const base = () => (desk().url || 'https://0n3.app').replace(/\/$/, '');
 const short = (s, n = 160) => { s = String(s || '').replace(/\s+/g, ' ').trim(); return s.length > n ? `${s.slice(0, n)}…` : s; };
 
 /** Turn a provider's raw failure into one plain sentence and the next step. */
+const WHO = { codex: 'ChatGPT', gemini: 'Gemini', claude: 'Claude' };
+/** The key connected on 0n3 was refused or is out of credit: the way out is the person's own account, one click away. */
+export const ownAccountHint = (engine) => `Open Commands and press "Sign in to ${WHO[engine] || 'your AI'} with my account" to use your own ${engine === 'codex' ? 'ChatGPT' : engine === 'gemini' ? 'Google' : 'Claude'} sign-in instead.`;
 export function friendly(engine, raw) {
   const s = String(raw || '');
-  if (/prepayment credits are depleted|RESOURCE_EXHAUSTED|quota/i.test(s)) return `${engine === 'gemini' ? 'Gemini' : 'Your AI'} says your credits are used up. Top up at ai.studio, sign in with a Google account that has free usage left (Commands → Sign in to Gemini), or switch to another AI above.`;
-  if (/refresh token|sign in again|401|Unauthorized|not logged in|auth_required|authenticate/i.test(s)) return `${engine === 'codex' ? 'Codex' : engine === 'gemini' ? 'Gemini' : 'Your AI'} needs you to sign in again. Click Commands → Sign in to ${engine === 'codex' ? 'Codex' : 'Gemini'}, finish in the browser, then try again.`;
+  if (/invalid api key|API key not valid|Fix external API key|incorrect api key|API_KEY_INVALID/i.test(s)) return `The ${WHO[engine] || 'AI'} key connected on 0n3 was refused, so 0n3 stopped using it. ${ownAccountHint(engine)}`;
+  if (/prepayment credits are depleted|RESOURCE_EXHAUSTED|quota/i.test(s)) return `${engine === 'gemini' ? 'Gemini' : 'Your AI'} says your credits are used up. Top up at ai.studio, switch to another AI above, or: ${ownAccountHint(engine)}`;
+  if (/refresh token|sign in again|401|Unauthorized|not logged in|auth_required|authenticate|API key is missing|API key not valid|invalid api key/i.test(s)) return `${engine === 'codex' ? 'ChatGPT (Codex)' : engine === 'gemini' ? 'Gemini' : 'Your AI'} needs you to sign in again. Click its name above and 0n3 opens the sign-in for you.`;
+  if (/quota exceeded|insufficient_quota|billing/i.test(s)) return `${WHO[engine] || 'Your AI'} says this key has no credit left. Add credit with the provider, switch to another AI above, or: ${ownAccountHint(engine)}`;
   if (/rate limit|429/i.test(s)) return 'Your AI is rate limited right now. Wait a minute, or switch to another AI above.';
   return short(s, 400);
 }
@@ -43,9 +50,11 @@ export class GeminiEngine {
   async start(cwd) {
     if (this.p && this.sid && this.cwd === cwd) return true;
     this.kill();
-    const bin = findBin('gemini'); if (!bin) { this.emit({ t: 'error', s: 'Gemini CLI is not on this computer. Click Commands → Install Gemini CLI.' }); return false; }
+    const c0 = ctx(); const l = resolve('gemini', c0); if (!l) { this.emit({ t: 'error', s: 'Gemini is not set up on this computer yet. Click Gemini above and 0n3 sets it up for you.' }); return false; }
     this.cwd = cwd; this.buf = '';
-    this.p = spawn(bin, ['--acp'], { cwd, env: env(), stdio: ['pipe', 'pipe', 'pipe'] });
+    const key = keyFor(c0, 'gemini');
+    this.p = spawn(l.cmd, [...l.pre, '--acp'], { cwd, env: envFor(c0, l, await signedEnv('gemini', c0, l).catch(() => ({}))), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    this.p.on('error', (e) => this.emit({ t: 'error', s: e.message }));
     this.p.stdout.on('data', (d) => { this.buf += d; let k; while ((k = this.buf.indexOf('\n')) >= 0) { const l = this.buf.slice(0, k); this.buf = this.buf.slice(k + 1); if (l.trim()) this.line(l); } });
     this.p.stderr.on('data', () => {});
     this.p.on('close', () => { this.p = null; this.sid = null; if (this.busy) { this.busy = false; this.emit({ t: 'done', ms: Date.now() - this.t0, stopped: true }); } });
@@ -53,7 +62,16 @@ export class GeminiEngine {
     if (init.error) { this.emit({ t: 'error', s: friendly('gemini', init.error.message) }); return false; }
     const c = desk();
     const mcpServers = c.token ? [{ type: 'http', name: '0n3', url: `${base()}/mcp`, headers: [{ name: 'Authorization', value: `Bearer ${c.token}` }] }] : [];
-    const s = await this.rpc('session/new', { cwd, mcpServers });
+    let s = await this.rpc('session/new', { cwd, mcpServers });
+    if (s.error && /api key|auth|sign in|log ?in|credential/i.test(s.error.message || '')) {
+      // Not signed in on this computer. With a key connected on 0n3 this is silent (the key was put in the environment
+      // above only when Gemini has no sign-in of its own); without one, Gemini opens the Google sign-in in the browser.
+      const method = key || process.env.GEMINI_API_KEY ? 'gemini-api-key' : 'oauth-personal';
+      if (method === 'oauth-personal') this.emit({ t: 'text', s: 'Gemini needs you to sign in once. Your browser is opening: choose your Google account there, then come back.\n\n' });
+      const a = await this.rpc('authenticate', { methodId: method });
+      if (a.error) { this.emit({ t: 'error', s: friendly('gemini', a.error.message) }); return false; }
+      s = await this.rpc('session/new', { cwd, mcpServers });
+    }
     if (s.error) { this.emit({ t: 'error', s: friendly('gemini', s.error.message) }); return false; }
     this.sid = s.result.sessionId;
     this.emit({ t: 'ready', model: 'Gemini CLI', tools: null, mcp: c.token ? ['0n3:connected'] : [] });
@@ -77,6 +95,7 @@ export class GeminiEngine {
     this.emit({ t: 'msg' });
     const r = await this.rpc('session/prompt', { sessionId: this.sid, prompt: [{ type: 'text', text: msg }] });
     this.busy = false;
+    if (r.error && /API key not valid|API_KEY_INVALID|invalid api key/i.test(r.error.message || '')) { await refuseKey('gemini', ctx()).catch(() => {}); this.kill(); }
     this.emit({ t: 'done', ms: Date.now() - this.t0, error: r.error ? friendly('gemini', r.error.message) : null, stopped: r.result?.stopReason === 'cancelled' });
     return true;
   }
@@ -90,13 +109,14 @@ export class CodexEngine {
   constructor(emit) { this.emit = emit; this.p = null; this.busy = false; this.started = new Set(); this.t0 = 0; }
   send(msg, cwd) {
     if (this.busy) { this.emit({ t: 'error', s: 'Still working on the last one. Press Stop, or wait a moment.' }); return false; }
-    const bin = findBin('codex'); if (!bin) { this.emit({ t: 'error', s: 'Codex is not on this computer. Click Commands → Install Codex.' }); return false; }
+    const c0 = ctx(); const l = resolve('codex', c0); if (!l) { this.emit({ t: 'error', s: 'ChatGPT (Codex) is not set up on this computer yet. Click ChatGPT above and 0n3 sets it up for you.' }); return false; }
     const c = desk(); this.busy = true; this.t0 = Date.now(); this.emit({ t: 'turn', s: msg });
     const mcp = c.token ? ['-c', `mcp_servers.on3.url="${base()}/mcp"`, '-c', 'mcp_servers.on3.bearer_token_env_var="ON3_TOKEN"'] : [];
     const common = ['--json', '--skip-git-repo-check', '-s', 'workspace-write', '-c', 'approval_policy="never"', ...mcp];
-    const args = this.started.has(cwd) ? ['exec', 'resume', '--last', ...common, msg] : ['exec', ...common, msg];
-    this.p = spawn(bin, args, { cwd, env: env(c.token ? { ON3_TOKEN: c.token } : {}), stdio: ['ignore', 'pipe', 'pipe'] });
     let buf = ''; let failed = null; let errText = '';
+    const args = this.started.has(cwd) ? ['exec', 'resume', '--last', ...common, msg] : ['exec', ...common, msg];
+    this.p = spawn(l.cmd, [...l.pre, ...args], { cwd, env: envFor(c0, l, c.token ? { ON3_TOKEN: c.token } : {}), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    this.p.on('error', (e) => { failed = e.message; });
     this.p.stdout.on('data', (d) => { buf += d; let k; while ((k = buf.indexOf('\n')) >= 0) { const l = buf.slice(0, k); buf = buf.slice(k + 1); let j; try { j = JSON.parse(l); } catch { continue; }
       const it = j.item || {};
       if (j.type === 'thread.started') this.emit({ t: 'ready', model: 'Codex', tools: null, mcp: c.token ? ['0n3:connected'] : [] });
@@ -112,6 +132,8 @@ export class CodexEngine {
     this.p.on('close', (code) => {
       this.p = null; this.busy = false; if (code === 0 && !failed) this.started.add(cwd);
       const why = failed || (code !== 0 ? (errText.match(/ERROR[^\n]*/g) || []).pop() || `Codex exited with ${code}` : null);
+      // a refused KEY (not an expired ChatGPT sign-in): forget it, so the next sign-in is the person's own account
+      if (why && /incorrect api key|invalid api key|401/i.test(why)) authStatus('codex', c0, l).then((st) => (st.how === 'key' ? refuseKey('codex', c0) : null)).catch(() => {});
       this.emit({ t: 'done', ms: Date.now() - this.t0, error: why ? friendly('codex', why) : null });
     });
     return true;
@@ -119,4 +141,41 @@ export class CodexEngine {
   stop() { if (this.p) { try { this.p.kill(); } catch { /* */ } } }
   reset() { this.started.clear(); this.stop(); }
   kill() { this.stop(); }
+}
+
+// ── THE 0n3 BOT: no program on this computer at all ──────────────────────────────────────────────────────────────────────
+/**
+ * 2026-11-25. A person who connected Gemini (or any AI) on 0n3 but has no AI program on the computer got "Claude is not
+ * installed" and nothing else. The 0n3 Bot answers from 0n3 itself (POST /api/bot/chat: THEIR connected AIs in THEIR order,
+ * every app they connected), so the terminal answers from the first minute, while the app installs an AI in the background.
+ * It cannot touch files on this computer; it says so when asked to.
+ */
+export class BotEngine {
+  constructor(emit) { this.emit = emit; this.busy = false; this.history = []; this.ctl = null; this.t0 = 0; }
+  async send(msg) {
+    if (this.busy) { this.emit({ t: 'error', s: 'Still working on the last one. Press Stop, or wait a moment.' }); return false; }
+    const c = desk(); this.busy = true; this.t0 = Date.now(); this.emit({ t: 'turn', s: msg });
+    const done = (error, stopped) => { this.busy = false; this.ctl = null; this.emit({ t: 'done', ms: Date.now() - this.t0, error: error || null, stopped: !!stopped }); };
+    if (!c.token) { done('Sign in to 0n3 first: open "Jobs & phone" above and sign in. Then come back here.'); return false; }
+    this.ctl = new AbortController();
+    try {
+      const r = await fetch(`${base()}/api/bot/chat`, { method: 'POST', signal: this.ctl.signal, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.token}` }, body: JSON.stringify({ message: msg, history: this.history }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.ok === false) { done(botError(d, r.status)); return false; }
+      this.emit({ t: 'ready', model: `${d.bot || '0n3 Bot'}${d.provider ? ` · ${d.provider}` : ''}`, tools: null, mcp: ['0n3:connected'] });
+      for (const [i, t] of (d.trace || []).entries()) { if (!t?.tool) continue; this.emit({ t: 'step', id: `b${this.t0}-${i}`, s: `0n3 · ${t.tool}${t.args?.service ? ` · ${t.args.service}${t.args.endpoint ? `.${t.args.endpoint}` : ''}` : ''}` }); this.emit({ t: 'result', id: `b${this.t0}-${i}`, error: t.ok === false }); }
+      this.emit({ t: 'msg' }); this.emit({ t: 'text', s: d.answer || '' });
+      if (Array.isArray(d.history)) this.history = d.history.slice(-40);
+      done(null);
+      return true;
+    } catch (e) { done(e.name === 'AbortError' ? null : `0n3 could not be reached (${e.message}). Check the internet connection.`, e.name === 'AbortError'); return false; }
+  }
+  stop() { try { this.ctl?.abort(); } catch { /* */ } }
+  reset() { this.stop(); this.history = []; }
+  kill() { this.stop(); }
+}
+export function botError(d, status) {
+  if (status === 401) return 'This computer is signed out of 0n3. Open "Jobs & phone" above and sign in again.';
+  if (d?.missing || /No AI is connected/i.test(d?.error || '')) return 'No AI is connected to your 0n3 account yet. Click Claude, ChatGPT or Gemini above and 0n3 sets one up on this computer, or add a free one at 0n3.app/free-ai.';
+  return String(d?.error || `0n3 answered ${status}.`).slice(0, 400);
 }
